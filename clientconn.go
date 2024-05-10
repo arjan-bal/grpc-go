@@ -1375,6 +1375,8 @@ func (ac *addrConn) createTransport(ctx context.Context, addr resolver.Address, 
 	copts.ChannelzParent = ac.channelz
 
 	newTr, err := transport.NewClientTransport(connectCtx, ac.cc.ctx, addr, copts, onClose)
+    logger.Info("Sleeping for some time 3")
+    time.Sleep(100 * time.Millisecond)
 	if err != nil {
 		if logger.V(2) {
 			logger.Infof("Creating new client transport to %q: %v", addr, err)
