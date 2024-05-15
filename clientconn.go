@@ -125,9 +125,10 @@ func (dcs *defaultConfigSelector) SelectConfig(rpcInfo iresolver.RPCInfo) (*ires
 // function.
 func NewClient(target string, opts ...DialOption) (conn *ClientConn, err error) {
 	cc := &ClientConn{
-		target: target,
-		conns:  make(map[*addrConn]struct{}),
-		dopts:  defaultDialOptions(),
+		target:           target,
+		conns:            make(map[*addrConn]struct{}),
+		dopts:            defaultDialOptions(),
+		ongoingCreations: sync.WaitGroup{},
 	}
 
 	cc.retryThrottler.Store((*retryThrottler)(nil))
@@ -618,6 +619,7 @@ type ClientConn struct {
 
 	lceMu               sync.Mutex // protects lastConnectionError
 	lastConnectionError error
+	ongoingCreations    sync.WaitGroup
 }
 
 // WaitForStateChange waits until the connectivity.State of ClientConn changes from sourceState or
@@ -1116,6 +1118,7 @@ func (cc *ClientConn) ResetConnectBackoff() {
 // Close tears down the ClientConn and all underlying connections.
 func (cc *ClientConn) Close() error {
 	defer func() {
+		logger.Info("Closing the context")
 		cc.cancel()
 		<-cc.csMgr.pubSub.Done()
 	}()
@@ -1155,6 +1158,7 @@ func (cc *ClientConn) Close() error {
 	// trace reference to the entity being deleted, and thus prevent it from being
 	// deleted right away.
 	channelz.RemoveEntry(cc.channelz.ID)
+	cc.ongoingCreations.Wait()
 
 	return nil
 }
@@ -1304,9 +1308,6 @@ func (ac *addrConn) resetTransport() {
 func (ac *addrConn) tryAllAddrs(ctx context.Context, addrs []resolver.Address, connectDeadline time.Time) error {
 	var firstConnErr error
 	for _, addr := range addrs {
-		if ctx.Err() != nil {
-			return errConnClosing
-		}
 		ac.mu.Lock()
 
 		ac.cc.mu.RLock()
@@ -1370,6 +1371,13 @@ func (ac *addrConn) createTransport(ctx context.Context, addr resolver.Address, 
 		ac.updateConnectivityState(connectivity.Idle, nil)
 	}
 
+	ac.cc.mu.RLock()
+	if ctx.Err() != nil {
+		ac.cc.mu.RUnlock()
+		return ctx.Err()
+	}
+	ac.cc.ongoingCreations.Add(1)
+	ac.cc.mu.RUnlock()
 	connectCtx, cancel := context.WithDeadline(ctx, connectDeadline)
 	defer cancel()
 	copts.ChannelzParent = ac.channelz
@@ -1378,6 +1386,7 @@ func (ac *addrConn) createTransport(ctx context.Context, addr resolver.Address, 
     logger.Info("Sleeping for some time 3")
     time.Sleep(100 * time.Millisecond)
 	if err != nil {
+		ac.cc.ongoingCreations.Done()
 		if logger.V(2) {
 			logger.Infof("Creating new client transport to %q: %v", addr, err)
 		}
@@ -1404,9 +1413,13 @@ func (ac *addrConn) createTransport(ctx context.Context, addr resolver.Address, 
 		//
 		// This can also happen when updateAddrs is called during a connection
 		// attempt.
-		go newTr.Close(transport.ErrConnClosing)
+		go func() {
+			newTr.Close(transport.ErrConnClosing)
+			ac.cc.ongoingCreations.Done()
+		}()
 		return nil
 	}
+	ac.cc.ongoingCreations.Done()
 	if hctx.Err() != nil {
 		// onClose was already called for this connection, but the connection
 		// was successfully established first.  Consider it a success and set
