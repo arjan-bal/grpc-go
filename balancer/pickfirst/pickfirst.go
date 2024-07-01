@@ -72,7 +72,6 @@ type pfConfig struct {
 // TODO(arjan-bal): Maybe guard using mutex?
 type subConnList struct {
 	subConns        []balancer.SubConn
-	stateListener   func(balancer.SubConn, balancer.SubConnState)
 	attemptingIndex int
 	b               *pickfirstBalancer
 	lastFailure     error
@@ -80,9 +79,16 @@ type subConnList struct {
 }
 
 func newSubConnList(addrs []resolver.Address, b *pickfirstBalancer) *subConnList {
+	if b.subConnList != nil {
+		if b.logger.V(2) {
+			b.logger.Infof("Closing older subConnList")
+		}
+		b.subConnList.reset()
+	}
 	sl := &subConnList{}
+	b.subConnList = sl
 	subConns := sl.subConns
-	sl.stateListener = func(subConn balancer.SubConn, state balancer.SubConnState) {
+	stateListener := func(subConn balancer.SubConn, state balancer.SubConnState) {
 		if b.logger.V(2) {
 			b.logger.Infof("Received SubConn state update: %p, %+v", subConn, state)
 		}
@@ -146,7 +152,7 @@ func newSubConnList(addrs []resolver.Address, b *pickfirstBalancer) *subConnList
 		var subConn balancer.SubConn
 		subConn, err := b.cc.NewSubConn([]resolver.Address{addr}, balancer.NewSubConnOptions{
 			StateListener: func(state balancer.SubConnState) {
-				sl.stateListener(subConn, state)
+				stateListener(subConn, state)
 			},
 		})
 		if err != nil {
@@ -183,6 +189,9 @@ func (sl *subConnList) reset() {
 }
 
 func (sl *subConnList) startConnectingNextSubConn() {
+	if sl.shuttingDown {
+		return
+	}
 	if sl.attemptingIndex < len(sl.subConns) {
 		sl.subConns[sl.attemptingIndex].Connect()
 		return
@@ -225,7 +234,8 @@ func (b *pickfirstBalancer) ResolverError(err error) {
 	if b.logger.V(2) {
 		b.logger.Infof("Received error from the name resolver: %v", err)
 	}
-	if b.subConnList == nil {
+	// TODO: Check this condition.
+	if b.selectedSubConn == nil {
 		b.state = connectivity.TransientFailure
 	}
 
@@ -249,7 +259,6 @@ func (b *pickfirstBalancer) unsetSelectedSubConn() {
 
 func (b *pickfirstBalancer) goIdle() {
 	b.unsetSelectedSubConn()
-	b.subConnList.reset()
 	callback := func() {
 		err := b.attemptToConnectUsingLatestAddrs()
 		if err == nil {
@@ -286,7 +295,6 @@ func (b *pickfirstBalancer) attemptToConnectUsingLatestAddrs() error {
 		b.unsetSelectedSubConn()
 		return balancer.ErrBadResolverState
 	}
-	b.subConnList = subConnList
 	b.state = connectivity.Idle
 	b.cc.UpdateState(balancer.State{
 		ConnectivityState: connectivity.Connecting,
@@ -304,13 +312,10 @@ func (b *pickfirstBalancer) UpdateClientConnState(state balancer.ClientConnState
 	if len(state.ResolverState.Addresses) == 0 && len(state.ResolverState.Endpoints) == 0 {
 		// The resolver reported an empty address list. Treat it like an error by
 		// calling b.ResolverError.
-        b.unsetSelectedSubConn()
-		if b.subConnList != nil {
-			// Shut down the old subConn. All addresses were removed, so it is
-			// no longer valid.
-			b.subConnList.reset()
-			b.subConnList = nil
-		}
+		b.unsetSelectedSubConn()
+		// Shut down the old subConnList. All addresses were removed, so it is
+		// no longer valid.
+		b.subConnList.reset()
 		b.ResolverError(errors.New("produced zero addresses"))
 		return balancer.ErrBadResolverState
 	}
@@ -358,14 +363,6 @@ func (b *pickfirstBalancer) UpdateClientConnState(state balancer.ClientConnState
 	}
 
 	b.latestAddressList = addrs
-	if b.subConnList != nil {
-		if b.logger.V(2) {
-			b.logger.Infof("Closing older subConnList")
-		}
-		b.subConnList.reset()
-		b.subConnList = nil
-	}
-
 	return b.attemptToConnectUsingLatestAddrs()
 }
 
