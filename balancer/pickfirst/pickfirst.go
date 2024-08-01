@@ -78,10 +78,25 @@ func (pickfirstBuilder) ParseConfig(js json.RawMessage) (serviceconfig.LoadBalan
 }
 
 type pickfirstBalancer struct {
-	logger  *internalgrpclog.PrefixLogger
-	state   connectivity.State
-	cc      balancer.ClientConn
-	subConn balancer.SubConn
+	logger         *internalgrpclog.PrefixLogger
+	state          connectivity.State
+	cc             balancer.ClientConn
+	subConn        balancer.SubConn
+	healthListener *healthListener
+}
+
+type healthListener struct {
+	subConn  balancer.SubConn
+	balancer *pickfirstBalancer
+	close    func()
+}
+
+func (hl *healthListener) OnStateChange(state connectivity.State, err error) {
+	fmt.Printf("State update from health listener: %v, %v\n", state, err)
+	hl.balancer.updateSubConnState(hl.subConn, balancer.SubConnState{
+		ConnectivityState: state,
+		ConnectionError:   err,
+	})
 }
 
 func (b *pickfirstBalancer) ResolverError(err error) {
@@ -116,6 +131,10 @@ func (b *pickfirstBalancer) UpdateClientConnState(state balancer.ClientConnState
 		if b.subConn != nil {
 			// Shut down the old subConn. All addresses were removed, so it is
 			// no longer valid.
+			if b.healthListener != nil {
+				b.healthListener.close()
+				b.healthListener = nil
+			}
 			b.subConn.Shutdown()
 			b.subConn = nil
 		}
@@ -175,6 +194,8 @@ func (b *pickfirstBalancer) UpdateClientConnState(state balancer.ClientConnState
 		StateListener: func(state balancer.SubConnState) {
 			b.updateSubConnState(subConn, state)
 		},
+		HealthCheckEnabled:   true,
+		EnableHealthProducer: true,
 	})
 	if err != nil {
 		if b.logger.V(2) {
@@ -213,8 +234,19 @@ func (b *pickfirstBalancer) updateSubConnState(subConn balancer.SubConn, state b
 		}
 		return
 	}
+	if state.ConnectivityState == connectivity.Ready && b.healthListener == nil {
+		b.healthListener = &healthListener{
+			balancer: b,
+			subConn:  subConn,
+		}
+		b.healthListener.close = balancer.RegisterHealthListenerFunc(subConn, b.healthListener)
+	}
 	if state.ConnectivityState == connectivity.Shutdown {
 		b.subConn = nil
+		if b.healthListener != nil {
+			b.healthListener.close()
+			b.healthListener = nil
+		}
 		return
 	}
 
@@ -254,6 +286,10 @@ func (b *pickfirstBalancer) updateSubConnState(subConn balancer.SubConn, state b
 }
 
 func (b *pickfirstBalancer) Close() {
+	if b.healthListener != nil {
+		b.healthListener.close()
+		b.healthListener = nil
+	}
 }
 
 func (b *pickfirstBalancer) ExitIdle() {

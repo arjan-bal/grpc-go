@@ -255,8 +255,9 @@ type acBalancerWrapper struct {
 	ccb           *ccBalancerWrapper // read-only
 	stateListener func(balancer.SubConnState)
 
-	mu        sync.Mutex
-	producers map[balancer.ProducerBuilder]*refCountedProducer
+	mu               sync.Mutex
+	producers        map[balancer.ProducerBuilder]*refCountedProducer
+	healthCheckClose func()
 }
 
 // updateState is invoked by grpc to push a subConn state update to the
@@ -266,6 +267,39 @@ func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolve
 		if ctx.Err() != nil || acbw.ccb.balancer == nil {
 			return
 		}
+		if s == connectivity.Ready {
+			acbw.ccb.cc.mu.RLock()
+			healthCheckEnabled := true
+			if acbw.ccb.cc.dopts.disableHealthCheck {
+				healthCheckEnabled = false
+			}
+			acbw.ccb.cc.mu.RUnlock()
+			healthCheckConfig := acbw.ccb.cc.healthCheckConfig()
+			serviceName := ""
+			if healthCheckConfig == nil {
+				healthCheckEnabled = false
+			} else {
+				serviceName = healthCheckConfig.ServiceName
+			}
+
+			acbw.ac.mu.Lock()
+			if !acbw.ac.scopts.HealthCheckEnabled || !acbw.ac.scopts.EnableHealthProducer {
+				healthCheckEnabled = false
+			}
+			acbw.ac.mu.Unlock()
+			// Start the health check.
+			schedule := func(f func()) {
+				acbw.ccb.serializer.TrySchedule(func(ctx context.Context) {
+					if ctx.Err() != nil {
+						return
+					}
+					f()
+				})
+			}
+			if balancer.HealthCheckStartFunc != nil {
+				acbw.healthCheckClose = balancer.HealthCheckStartFunc(ctx, acbw, healthCheckEnabled, serviceName, schedule)
+			}
+		}
 		// Even though it is optional for balancers, gracefulswitch ensures
 		// opts.StateListener is set, so this cannot ever be nil.
 		// TODO: delete this comment when UpdateSubConnState is removed.
@@ -274,6 +308,11 @@ func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolve
 			setConnectedAddress(&scs, curAddr)
 		}
 		acbw.stateListener(scs)
+		if s == connectivity.Shutdown {
+			if acbw.healthCheckClose != nil {
+				acbw.healthCheckClose()
+			}
+		}
 	})
 }
 

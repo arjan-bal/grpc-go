@@ -208,7 +208,7 @@ func (s) TestHealthCheckWatchStateChange(t *testing.T) {
 	"healthCheckConfig": {
 		"serviceName": "foo"
 	},
-	"loadBalancingConfig": [{"round_robin":{}}]
+	"loadBalancingConfig": [{"pick_first":{}}]
 }`)})
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
