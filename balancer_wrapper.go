@@ -260,6 +260,20 @@ type acBalancerWrapper struct {
 	healthCheckClose func()
 }
 
+type wrappedHealthListener struct {
+	delegate   balancer.HealthListener
+	serializer *grpcsync.CallbackSerializer
+}
+
+func (l *wrappedHealthListener) OnStateChange(state connectivity.State, err error) {
+	l.serializer.TrySchedule(func(ctx context.Context) {
+		if ctx.Err() != nil {
+			return
+		}
+		l.delegate.OnStateChange(state, err)
+	})
+}
+
 // updateState is invoked by grpc to push a subConn state update to the
 // underlying balancer.
 func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolver.Address, err error) {
@@ -288,16 +302,13 @@ func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolve
 			}
 			acbw.ac.mu.Unlock()
 			// Start the health check.
-			schedule := func(f func()) {
-				acbw.ccb.serializer.TrySchedule(func(ctx context.Context) {
-					if ctx.Err() != nil {
-						return
-					}
-					f()
-				})
-			}
-			if balancer.HealthCheckStartFunc != nil {
-				acbw.healthCheckClose = balancer.HealthCheckStartFunc(ctx, acbw, healthCheckEnabled, serviceName, schedule)
+			hl := acbw.ac.scopts.HealthStateListener
+			if balancer.HealthCheckStartFunc != nil && healthCheckEnabled && hl != nil {
+				wl := &wrappedHealthListener{
+					delegate:   hl,
+					serializer: acbw.ccb.serializer,
+				}
+				acbw.healthCheckClose = balancer.HealthCheckStartFunc(ctx, acbw, healthCheckEnabled, serviceName, wl)
 			}
 		}
 		// Even though it is optional for balancers, gracefulswitch ensures

@@ -43,11 +43,6 @@ var (
 
 	logger               = grpclog.Component("balancer")
 	HealthCheckStartFunc HealthCheckStart
-	// Call this only once subConn is READY.
-	RegisterHealthListenerFunc = func(sc SubConn, l HealthListener) func() {
-		l.OnStateChange(connectivity.Ready, nil)
-		return func() {}
-	}
 )
 
 // Register registers the balancer builder to the balancer map. b.Name
@@ -176,8 +171,11 @@ type NewSubConnOptions struct {
 	// invoked until after Connect() is called on the SubConn created with
 	// these options.
 	StateListener func(SubConnState)
+
 	// EnableHealthProducer for this subConn.
 	EnableHealthProducer bool
+	// HealthStateListener is the listener for the health state.
+	HealthStateListener HealthListener
 }
 
 // State contains the balancer's state relevant to the gRPC ClientConn.
@@ -467,7 +465,7 @@ type ProducerBuilder interface {
 type Producer any
 
 // HealthCheckStart TODO
-type HealthCheckStart func(ctx context.Context, sc SubConn, enableHealthCheck bool, serviceName string, scheduleCallback func(func())) func()
+type HealthCheckStart func(ctx context.Context, sc SubConn, enableHealthCheck bool, serviceName string, hl HealthListener) func()
 
 // HealthListener is used to listen to subConn state updates.
 type HealthListener interface {

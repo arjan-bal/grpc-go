@@ -15,7 +15,6 @@ import (
 func init() {
 	producerBuilderSingleton = &producerBuilder{}
 	balancer.HealthCheckStartFunc = StartHealtCheck
-	balancer.RegisterHealthListenerFunc = RegisterHealthListener
 }
 
 type producerBuilder struct{}
@@ -25,22 +24,19 @@ var producerBuilderSingleton *producerBuilder
 // Build constructs and returns a producer and its cleanup function
 func (*producerBuilder) Build(cci any) (balancer.Producer, func()) {
 	p := &producer{
-		cc:        cci.(grpc.ClientConnInterface),
-		mu:        sync.Mutex{},
-		listeners: map[balancer.HealthListener]bool{},
+		cc: cci.(grpc.ClientConnInterface),
+		mu: sync.Mutex{},
 	}
 	return p, sync.OnceFunc(func() {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		p.stopped = true
-		p.listeners = nil
 	})
 }
 
 type producer struct {
 	cc        grpc.ClientConnInterface
 	mu        sync.Mutex
-	listeners map[balancer.HealthListener]bool
 	started   bool
 	stopped   bool
 	state     connectivity.State
@@ -48,32 +44,27 @@ type producer struct {
 	scheduler func(func())
 }
 
-func StartHealtCheck(ctx context.Context, sc balancer.SubConn, enableHealthCheck bool, serviceName string, scheduleCallback func(func())) func() {
-	pr, close := sc.GetOrBuildProducer(&producerBuilder{})
+func StartHealtCheck(ctx context.Context, sc balancer.SubConn, enableHealthCheck bool, serviceName string, listener balancer.HealthListener) func() {
+	pr, close := sc.GetOrBuildProducer(producerBuilderSingleton)
 	p := pr.(*producer)
 	p.mu.Lock()
 	if p.started || p.stopped {
 		p.mu.Unlock()
 		return close
 	}
-	p.scheduler = scheduleCallback
 	p.started = true
 	p.state = connectivity.Connecting
 	p.mu.Unlock()
 
 	if !enableHealthCheck {
-		scheduleCallback(func() {
-			p.mu.Lock()
-			defer p.mu.Unlock()
-			if p.stopped {
-				return
-			}
-			p.state = connectivity.Ready
-			p.err = nil
-			for l, _ := range p.listeners {
-				l.OnStateChange(p.state, nil)
-			}
-		})
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.stopped {
+			return close
+		}
+		p.state = connectivity.Ready
+		p.err = nil
+		listener.OnStateChange(p.state, nil)
 		return close
 	}
 
@@ -82,15 +73,11 @@ func StartHealtCheck(ctx context.Context, sc balancer.SubConn, enableHealthCheck
 	}
 
 	setConnectivityState := func(state connectivity.State, err error) {
-		scheduleCallback(func() {
-			p.mu.Lock()
-			defer p.mu.Unlock()
-			p.state = state
-			p.err = err
-			for l, _ := range p.listeners {
-				l.OnStateChange(state, err)
-			}
-		})
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.state = state
+		p.err = err
+		listener.OnStateChange(state, err)
 	}
 
 	go func() {
@@ -105,35 +92,4 @@ func StartHealtCheck(ctx context.Context, sc balancer.SubConn, enableHealthCheck
 		}
 	}()
 	return close
-}
-
-func RegisterHealthListener(sc balancer.SubConn, l balancer.HealthListener) func() {
-	pr, close := sc.GetOrBuildProducer(&producerBuilder{})
-	p := pr.(*producer)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.stopped {
-		return func() {
-			close()
-		}
-	}
-	if p.started {
-		p.scheduler(func() {
-			l.OnStateChange(p.state, p.err)
-		})
-	}
-	p.listeners[l] = true
-	return func() {
-		p.unRegisterHealthListener(l)
-		close()
-	}
-}
-
-func (p *producer) unRegisterHealthListener(l balancer.HealthListener) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.stopped {
-		return
-	}
-	delete(p.listeners, l)
 }

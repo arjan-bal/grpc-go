@@ -88,11 +88,10 @@ type pickfirstBalancer struct {
 type healthListener struct {
 	subConn  balancer.SubConn
 	balancer *pickfirstBalancer
-	close    func()
 }
 
 func (hl *healthListener) OnStateChange(state connectivity.State, err error) {
-	fmt.Printf("State update from health listener: %v, %v\n", state, err)
+	fmt.Printf("State update from health listener for subconn %v: %v, %v\n", hl.subConn, state, err)
 	hl.balancer.updateSubConnState(hl.subConn, balancer.SubConnState{
 		ConnectivityState: state,
 		ConnectionError:   err,
@@ -131,10 +130,6 @@ func (b *pickfirstBalancer) UpdateClientConnState(state balancer.ClientConnState
 		if b.subConn != nil {
 			// Shut down the old subConn. All addresses were removed, so it is
 			// no longer valid.
-			if b.healthListener != nil {
-				b.healthListener.close()
-				b.healthListener = nil
-			}
 			b.subConn.Shutdown()
 			b.subConn = nil
 		}
@@ -190,11 +185,15 @@ func (b *pickfirstBalancer) UpdateClientConnState(state balancer.ClientConnState
 	}
 
 	var subConn balancer.SubConn
+	hl := &healthListener{
+		balancer: b,
+	}
 	subConn, err := b.cc.NewSubConn(addrs, balancer.NewSubConnOptions{
 		StateListener: func(state balancer.SubConnState) {
 			b.updateSubConnState(subConn, state)
 		},
 		HealthCheckEnabled:   true,
+		HealthStateListener:  hl,
 		EnableHealthProducer: true,
 	})
 	if err != nil {
@@ -208,6 +207,7 @@ func (b *pickfirstBalancer) UpdateClientConnState(state balancer.ClientConnState
 		})
 		return balancer.ErrBadResolverState
 	}
+	hl.subConn = subConn
 	b.subConn = subConn
 	b.state = connectivity.Idle
 	b.cc.UpdateState(balancer.State{
@@ -234,19 +234,8 @@ func (b *pickfirstBalancer) updateSubConnState(subConn balancer.SubConn, state b
 		}
 		return
 	}
-	if state.ConnectivityState == connectivity.Ready && b.healthListener == nil {
-		b.healthListener = &healthListener{
-			balancer: b,
-			subConn:  subConn,
-		}
-		b.healthListener.close = balancer.RegisterHealthListenerFunc(subConn, b.healthListener)
-	}
 	if state.ConnectivityState == connectivity.Shutdown {
 		b.subConn = nil
-		if b.healthListener != nil {
-			b.healthListener.close()
-			b.healthListener = nil
-		}
 		return
 	}
 
@@ -286,10 +275,6 @@ func (b *pickfirstBalancer) updateSubConnState(subConn balancer.SubConn, state b
 }
 
 func (b *pickfirstBalancer) Close() {
-	if b.healthListener != nil {
-		b.healthListener.close()
-		b.healthListener = nil
-	}
 }
 
 func (b *pickfirstBalancer) ExitIdle() {
