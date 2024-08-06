@@ -176,6 +176,12 @@ func (ccb *ccBalancerWrapper) NewSubConn(addrs []resolver.Address, opts balancer
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("grpc: cannot create SubConn with empty address list")
 	}
+	if opts.HealthStateListener != nil {
+		opts.HealthStateListener = &wrappedHealthListener{
+			delegate:   opts.HealthStateListener,
+			serializer: ccb.serializer,
+		}
+	}
 	ac, err := ccb.cc.newAddrConnLocked(addrs, opts)
 	if err != nil {
 		channelz.Warningf(logger, ccb.cc.channelz, "acBalancerWrapper: NewSubConn: failed to newAddrConn: %v", err)
@@ -255,9 +261,8 @@ type acBalancerWrapper struct {
 	ccb           *ccBalancerWrapper // read-only
 	stateListener func(balancer.SubConnState)
 
-	mu               sync.Mutex
-	producers        map[balancer.ProducerBuilder]*refCountedProducer
-	healthCheckClose func()
+	mu        sync.Mutex
+	producers map[balancer.ProducerBuilder]*refCountedProducer
 }
 
 type wrappedHealthListener struct {
@@ -266,11 +271,6 @@ type wrappedHealthListener struct {
 }
 
 func (l *wrappedHealthListener) OnStateChange(state connectivity.State, err error) {
-	// No listener registered, could be using subConn health checking or no
-	// health checking at all.
-	if l.delegate == nil {
-		return
-	}
 	l.serializer.TrySchedule(func(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
@@ -286,41 +286,6 @@ func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolve
 		if ctx.Err() != nil || acbw.ccb.balancer == nil {
 			return
 		}
-		if s == connectivity.Ready {
-			acbw.ccb.cc.mu.RLock()
-			healthCheckEnabled := true
-			if acbw.ccb.cc.dopts.disableHealthCheck {
-				healthCheckEnabled = false
-			}
-			acbw.ccb.cc.mu.RUnlock()
-			healthCheckConfig := acbw.ccb.cc.healthCheckConfig()
-			serviceName := ""
-			if healthCheckConfig == nil {
-				healthCheckEnabled = false
-			} else {
-				serviceName = healthCheckConfig.ServiceName
-			}
-
-			acbw.ac.mu.Lock()
-			if !acbw.ac.scopts.HealthCheckEnabled || acbw.ac.scopts.HealthStateListener == nil {
-				healthCheckEnabled = false
-			}
-			acbw.ac.mu.Unlock()
-			// Start the health check.
-			hl := &wrappedHealthListener{
-				delegate:   acbw.ac.scopts.HealthStateListener,
-				serializer: acbw.ccb.serializer,
-			}
-
-			if balancer.HealthCheckStartFunc != nil {
-				acbw.healthCheckClose = balancer.HealthCheckStartFunc(ctx, balancer.HealthCheckOptions{
-					SubConn:           acbw,
-					EnableHealthCheck: healthCheckEnabled,
-					ServiceName:       serviceName,
-					Listener:          hl,
-				})
-			}
-		}
 		// Even though it is optional for balancers, gracefulswitch ensures
 		// opts.StateListener is set, so this cannot ever be nil.
 		// TODO: delete this comment when UpdateSubConnState is removed.
@@ -329,11 +294,6 @@ func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolve
 			setConnectedAddress(&scs, curAddr)
 		}
 		acbw.stateListener(scs)
-		if s == connectivity.Shutdown {
-			if acbw.healthCheckClose != nil {
-				acbw.healthCheckClose()
-			}
-		}
 	})
 }
 

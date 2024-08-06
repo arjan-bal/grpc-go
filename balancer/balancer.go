@@ -41,8 +41,7 @@ var (
 	// m is a map from name to balancer builder.
 	m = make(map[string]Builder)
 
-	logger               = grpclog.Component("balancer")
-	HealthCheckStartFunc HealthCheckStart
+	logger = grpclog.Component("balancer")
 )
 
 // Register registers the balancer builder to the balancer map. b.Name
@@ -462,17 +461,6 @@ type ProducerBuilder interface {
 // other methods to provide additional functionality, e.g. configuration or
 // subscription registration.
 type Producer any
-
-// HealthCheckOptions are the options to configure the health check producer.
-type HealthCheckOptions struct {
-	SubConn           SubConn
-	EnableHealthCheck bool
-	ServiceName       string
-	Listener                HealthListener
-}
-
-// HealthCheckStart starts the health check using the health producer.
-type HealthCheckStart func(context.Context, HealthCheckOptions) func()
 
 // HealthListener is used to listen to subConn state updates.
 type HealthListener interface {

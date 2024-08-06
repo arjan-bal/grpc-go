@@ -1436,14 +1436,10 @@ func (ac *addrConn) createTransport(ctx context.Context, addr resolver.Address, 
 func (ac *addrConn) startHealthCheck(ctx context.Context) {
 	var healthcheckManagingState bool
 	defer func() {
-		if !healthcheckManagingState {
+		if !healthcheckManagingState || ac.scopts.HealthStateListener != nil {
 			ac.updateConnectivityState(connectivity.Ready, nil)
 		}
 	}()
-
-	if ac.scopts.HealthStateListener != nil {
-		return
-	}
 
 	if ac.cc.dopts.disableHealthCheck {
 		return
@@ -1483,7 +1479,11 @@ func (ac *addrConn) startHealthCheck(ctx context.Context) {
 		if ac.transport != currentTr {
 			return
 		}
-		ac.updateConnectivityState(s, lastErr)
+		if ac.scopts.HealthStateListener != nil {
+			ac.scopts.HealthStateListener.OnStateChange(s, lastErr)
+		} else {
+			ac.updateConnectivityState(s, lastErr)
+		}
 	}
 	// Start the health checking stream.
 	go func() {
