@@ -173,7 +173,7 @@ type NewSubConnOptions struct {
 	StateListener func(SubConnState)
 
 	// HealthStateListener is the listener for the health state.
-    // If not set and health checking is requested, it will be done in the subConn.
+	// If not set and health checking is requested, it will be done in the subConn.
 	HealthStateListener HealthListener
 }
 
@@ -463,11 +463,19 @@ type ProducerBuilder interface {
 // subscription registration.
 type Producer any
 
-// HealthCheckStart TODO
-type HealthCheckStart func(ctx context.Context, sc SubConn, enableHealthCheck bool, serviceName string, hl HealthListener) func()
+// HealthCheckOptions are the options to configure the health check producer.
+type HealthCheckOptions struct {
+	SubConn           SubConn
+	EnableHealthCheck bool
+	ServiceName       string
+	Listener                HealthListener
+}
+
+// HealthCheckStart starts the health check using the health producer.
+type HealthCheckStart func(context.Context, HealthCheckOptions) func()
 
 // HealthListener is used to listen to subConn state updates.
 type HealthListener interface {
-	// OnLoadReport is called when a load report is received.
+	// OnStateChange is called when the health check state changes.
 	OnStateChange(connectivity.State, error)
 }

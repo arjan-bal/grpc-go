@@ -266,8 +266,8 @@ type wrappedHealthListener struct {
 }
 
 func (l *wrappedHealthListener) OnStateChange(state connectivity.State, err error) {
-    // No listener registered, could be using subConn health checking or no
-    // health checking at all.
+	// No listener registered, could be using subConn health checking or no
+	// health checking at all.
 	if l.delegate == nil {
 		return
 	}
@@ -313,7 +313,12 @@ func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolve
 			}
 
 			if balancer.HealthCheckStartFunc != nil {
-				acbw.healthCheckClose = balancer.HealthCheckStartFunc(ctx, acbw, healthCheckEnabled, serviceName, hl)
+				acbw.healthCheckClose = balancer.HealthCheckStartFunc(ctx, balancer.HealthCheckOptions{
+					SubConn:           acbw,
+					EnableHealthCheck: healthCheckEnabled,
+					ServiceName:       serviceName,
+					Listener:          hl,
+				})
 			}
 		}
 		// Even though it is optional for balancers, gracefulswitch ensures

@@ -44,8 +44,8 @@ type producer struct {
 	scheduler func(func())
 }
 
-func StartHealtCheck(ctx context.Context, sc balancer.SubConn, enableHealthCheck bool, serviceName string, listener balancer.HealthListener) func() {
-	pr, close := sc.GetOrBuildProducer(producerBuilderSingleton)
+func StartHealtCheck(ctx context.Context, opts balancer.HealthCheckOptions) func() {
+	pr, close := opts.SubConn.GetOrBuildProducer(producerBuilderSingleton)
 	p := pr.(*producer)
 	p.mu.Lock()
 	if p.started || p.stopped {
@@ -56,7 +56,7 @@ func StartHealtCheck(ctx context.Context, sc balancer.SubConn, enableHealthCheck
 	p.state = connectivity.Connecting
 	p.mu.Unlock()
 
-	if !enableHealthCheck {
+	if !opts.EnableHealthCheck {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if p.stopped {
@@ -64,7 +64,7 @@ func StartHealtCheck(ctx context.Context, sc balancer.SubConn, enableHealthCheck
 		}
 		p.state = connectivity.Ready
 		p.err = nil
-		listener.OnStateChange(p.state, nil)
+		opts.Listener.OnStateChange(p.state, nil)
 		return close
 	}
 
@@ -77,11 +77,11 @@ func StartHealtCheck(ctx context.Context, sc balancer.SubConn, enableHealthCheck
 		defer p.mu.Unlock()
 		p.state = state
 		p.err = err
-		listener.OnStateChange(state, err)
+		opts.Listener.OnStateChange(state, err)
 	}
 
 	go func() {
-		err := clientHealthCheck(ctx, newStream, setConnectivityState, serviceName)
+		err := clientHealthCheck(ctx, newStream, setConnectivityState, opts.ServiceName)
 		if err == nil {
 			return
 		}
