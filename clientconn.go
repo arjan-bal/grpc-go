@@ -1441,9 +1441,9 @@ func (ac *addrConn) startHealthCheck(ctx context.Context) {
 		}
 	}()
 
-    if ac.scopts.EnableHealthProducer {
-        return
-    }
+	if ac.scopts.HealthStateListener != nil {
+		return
+	}
 
 	if ac.cc.dopts.disableHealthCheck {
 		return

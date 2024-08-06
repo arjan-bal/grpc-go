@@ -266,6 +266,11 @@ type wrappedHealthListener struct {
 }
 
 func (l *wrappedHealthListener) OnStateChange(state connectivity.State, err error) {
+    // No listener registered, could be using subConn health checking or no
+    // health checking at all.
+	if l.delegate == nil {
+		return
+	}
 	l.serializer.TrySchedule(func(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
@@ -297,18 +302,18 @@ func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolve
 			}
 
 			acbw.ac.mu.Lock()
-			if !acbw.ac.scopts.HealthCheckEnabled || !acbw.ac.scopts.EnableHealthProducer {
+			if !acbw.ac.scopts.HealthCheckEnabled || acbw.ac.scopts.HealthStateListener == nil {
 				healthCheckEnabled = false
 			}
 			acbw.ac.mu.Unlock()
 			// Start the health check.
-			hl := acbw.ac.scopts.HealthStateListener
-			if balancer.HealthCheckStartFunc != nil && healthCheckEnabled && hl != nil {
-				wl := &wrappedHealthListener{
-					delegate:   hl,
-					serializer: acbw.ccb.serializer,
-				}
-				acbw.healthCheckClose = balancer.HealthCheckStartFunc(ctx, acbw, healthCheckEnabled, serviceName, wl)
+			hl := &wrappedHealthListener{
+				delegate:   acbw.ac.scopts.HealthStateListener,
+				serializer: acbw.ccb.serializer,
+			}
+
+			if balancer.HealthCheckStartFunc != nil {
+				acbw.healthCheckClose = balancer.HealthCheckStartFunc(ctx, acbw, healthCheckEnabled, serviceName, hl)
 			}
 		}
 		// Even though it is optional for balancers, gracefulswitch ensures

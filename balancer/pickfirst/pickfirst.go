@@ -194,7 +194,6 @@ func (b *pickfirstBalancer) UpdateClientConnState(state balancer.ClientConnState
 		},
 		HealthCheckEnabled:   true,
 		HealthStateListener:  hl,
-		EnableHealthProducer: true,
 	})
 	if err != nil {
 		if b.logger.V(2) {

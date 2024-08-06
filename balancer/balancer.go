@@ -172,9 +172,8 @@ type NewSubConnOptions struct {
 	// these options.
 	StateListener func(SubConnState)
 
-	// EnableHealthProducer for this subConn.
-	EnableHealthProducer bool
 	// HealthStateListener is the listener for the health state.
+    // If not set and health checking is requested, it will be done in the subConn.
 	HealthStateListener HealthListener
 }
 
