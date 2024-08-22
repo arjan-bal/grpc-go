@@ -270,12 +270,12 @@ type wrappedHealthListener struct {
 	serializer *grpcsync.CallbackSerializer
 }
 
-func (l *wrappedHealthListener) OnStateChange(state connectivity.State, err error) {
+func (l *wrappedHealthListener) OnStateChange(state balancer.SubConnState) {
 	l.serializer.TrySchedule(func(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		l.delegate.OnStateChange(state, err)
+		l.delegate.OnStateChange(state)
 	})
 }
 

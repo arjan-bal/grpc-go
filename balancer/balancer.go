@@ -465,5 +465,5 @@ type Producer any
 // HealthListener is used to listen to subConn state updates.
 type HealthListener interface {
 	// OnStateChange is called when the health check state changes.
-	OnStateChange(connectivity.State, error)
+	OnStateChange(SubConnState)
 }

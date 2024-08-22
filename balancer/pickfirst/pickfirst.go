@@ -50,8 +50,10 @@ const (
 
 type pickfirstBuilder struct{}
 
-func (pickfirstBuilder) Build(cc balancer.ClientConn, opt balancer.BuildOptions) balancer.Balancer {
-	b := &pickfirstBalancer{cc: cc}
+func (pickfirstBuilder) Build(cc balancer.ClientConn, _ balancer.BuildOptions) balancer.Balancer {
+	b := &pickfirstBalancer{
+		cc: cc,
+	}
 	b.logger = internalgrpclog.NewPrefixLogger(logger, fmt.Sprintf(logPrefix, b))
 	return b
 }
@@ -90,12 +92,9 @@ type healthListener struct {
 	balancer *pickfirstBalancer
 }
 
-func (hl *healthListener) OnStateChange(state connectivity.State, err error) {
-	fmt.Printf("State update from health listener for subconn %v: %v, %v\n", hl.subConn, state, err)
-	hl.balancer.updateSubConnState(hl.subConn, balancer.SubConnState{
-		ConnectivityState: state,
-		ConnectionError:   err,
-	})
+func (hl *healthListener) OnStateChange(state balancer.SubConnState) {
+	fmt.Printf("State update from health listener for subconn %v: %v\n", hl.subConn, state)
+	hl.balancer.updateSubConnState(hl.subConn, state, true)
 }
 
 func (b *pickfirstBalancer) ResolverError(err error) {
@@ -190,10 +189,9 @@ func (b *pickfirstBalancer) UpdateClientConnState(state balancer.ClientConnState
 	}
 	subConn, err := b.cc.NewSubConn(addrs, balancer.NewSubConnOptions{
 		StateListener: func(state balancer.SubConnState) {
-			b.updateSubConnState(subConn, state)
+			b.updateSubConnState(subConn, state, false)
 		},
-		HealthCheckEnabled:   true,
-		HealthStateListener:  hl,
+		HealthStateListener: hl,
 	})
 	if err != nil {
 		if b.logger.V(2) {
@@ -223,7 +221,7 @@ func (b *pickfirstBalancer) UpdateSubConnState(subConn balancer.SubConn, state b
 	b.logger.Errorf("UpdateSubConnState(%v, %+v) called unexpectedly", subConn, state)
 }
 
-func (b *pickfirstBalancer) updateSubConnState(subConn balancer.SubConn, state balancer.SubConnState) {
+func (b *pickfirstBalancer) updateSubConnState(subConn balancer.SubConn, state balancer.SubConnState, fromHealthCheck bool) {
 	if b.logger.V(2) {
 		b.logger.Infof("Received SubConn state update: %p, %+v", subConn, state)
 	}
@@ -240,6 +238,10 @@ func (b *pickfirstBalancer) updateSubConnState(subConn balancer.SubConn, state b
 
 	switch state.ConnectivityState {
 	case connectivity.Ready:
+		if !fromHealthCheck {
+			// Wait for update from the health check.
+			return
+		}
 		b.cc.UpdateState(balancer.State{
 			ConnectivityState: state.ConnectivityState,
 			Picker:            &picker{result: balancer.PickResult{SubConn: subConn}},

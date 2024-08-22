@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/balancer"
+	"google.golang.org/grpc/balancer/pickfirst"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
@@ -184,7 +186,36 @@ func setupClient(t *testing.T, c *clientConfig) (*grpc.ClientConn, *manual.Resol
 	return cc, r
 }
 
+const petiolePolicyName = "petiole_policy"
+
+type petiolePolicyBuilder struct{}
+
+// wraps the clientconn to enable health checking in the created subconns.
+type wrappedCC struct {
+	balancer.ClientConn
+}
+
+func (w *wrappedCC) NewSubConn(addrs []resolver.Address, opts balancer.NewSubConnOptions) (balancer.SubConn, error) {
+	opts.HealthCheckEnabled = true
+	return w.ClientConn.NewSubConn(addrs, opts)
+}
+
+func (b *petiolePolicyBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
+	return &petiolePolicy{
+		balancer.Get(pickfirst.Name).Build(&wrappedCC{cc}, opts),
+	}
+}
+
+func (b *petiolePolicyBuilder) Name() string {
+	return petiolePolicyName
+}
+
+type petiolePolicy struct {
+	balancer.Balancer
+}
+
 func (s) TestHealthCheckWatchStateChange(t *testing.T) {
+	balancer.Register(&petiolePolicyBuilder{})
 	_, lis, ts := setupServer(t, nil)
 
 	// The table below shows the expected series of addrConn connectivity transitions when server
@@ -204,12 +235,12 @@ func (s) TestHealthCheckWatchStateChange(t *testing.T) {
 	cc, r := setupClient(t, nil)
 	r.UpdateState(resolver.State{
 		Addresses: []resolver.Address{{Addr: lis.Addr().String()}},
-		ServiceConfig: parseServiceConfig(t, r, `{
+		ServiceConfig: parseServiceConfig(t, r, fmt.Sprintf(`{
 	"healthCheckConfig": {
 		"serviceName": "foo"
 	},
-	"loadBalancingConfig": [{"pick_first":{}}]
-}`)})
+	"loadBalancingConfig": [{"%s":{}}]
+}`, petiolePolicyName))})
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
 	defer cancel()
