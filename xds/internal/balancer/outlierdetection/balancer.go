@@ -33,7 +33,9 @@ import (
 	"unsafe"
 
 	"google.golang.org/grpc/balancer"
+	"google.golang.org/grpc/balancer/pickfirstleaf"
 	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/health/producer"
 	"google.golang.org/grpc/internal/balancer/gracefulswitch"
 	"google.golang.org/grpc/internal/buffer"
 	"google.golang.org/grpc/internal/channelz"
@@ -353,7 +355,31 @@ func (b *outlierDetectionBalancer) updateSubConnState(sc balancer.SubConn, state
 		return
 	}
 	if state.ConnectivityState == connectivity.Shutdown {
+		if scw.unregisterHealthListener != nil {
+			scw.unregisterHealthListener()
+			scw.unregisterHealthListener = nil
+		}
 		delete(b.scWrappers, scw.SubConn)
+	}
+	if scw.genericHealthProducerEnabled {
+		scw.listener(state)
+		return
+	}
+	b.scUpdateCh.Put(&scUpdate{
+		scw:   scw,
+		state: state,
+	})
+}
+
+func (b *outlierDetectionBalancer) updateHealthState(sc balancer.SubConn, state balancer.SubConnState) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	scw, ok := b.scWrappers[sc]
+	if !ok {
+		// Shouldn't happen if passed down a SubConnWrapper to child on SubConn
+		// creation.
+		b.logger.Errorf("OnStateChange called with SubConn that has no corresponding SubConnWrapper")
+		return
 	}
 	b.scUpdateCh.Put(&scUpdate{
 		scw:   scw,
@@ -379,6 +405,13 @@ func (b *outlierDetectionBalancer) Close() {
 	defer b.mu.Unlock()
 	if b.intervalTimer != nil {
 		b.intervalTimer.Stop()
+	}
+
+	for _, scw := range b.scWrappers {
+		if scw.unregisterHealthListener != nil {
+			scw.unregisterHealthListener()
+			scw.unregisterHealthListener = nil
+		}
 	}
 }
 
@@ -466,7 +499,22 @@ func (b *outlierDetectionBalancer) UpdateState(s balancer.State) {
 	b.pickerUpdateCh.Put(s)
 }
 
+type healthListener struct {
+	b  *outlierDetectionBalancer
+	sc balancer.SubConn
+}
+
+func (hl *healthListener) OnStateChange(state balancer.SubConnState) {
+	hl.b.updateHealthState(hl.sc, state)
+}
+
 func (b *outlierDetectionBalancer) NewSubConn(addrs []resolver.Address, opts balancer.NewSubConnOptions) (balancer.SubConn, error) {
+	// Determine if the generic health producer is being used.
+	genericHealthProducerEnabled := false
+	if len(addrs) == 1 && addrs[0].Attributes.Value(pickfirstleaf.GenericHealthProducerEnabledKey) == pickfirstleaf.GenericHealthProducerEnabledValue {
+		genericHealthProducerEnabled = true
+	}
+
 	var sc balancer.SubConn
 	oldListener := opts.StateListener
 	opts.StateListener = func(state balancer.SubConnState) { b.updateSubConnState(sc, state) }
@@ -475,10 +523,17 @@ func (b *outlierDetectionBalancer) NewSubConn(addrs []resolver.Address, opts bal
 		return nil, err
 	}
 	scw := &subConnWrapper{
-		SubConn:    sc,
-		addresses:  addrs,
-		scUpdateCh: b.scUpdateCh,
-		listener:   oldListener,
+		SubConn:                      sc,
+		addresses:                    addrs,
+		scUpdateCh:                   b.scUpdateCh,
+		listener:                     oldListener,
+		genericHealthProducerEnabled: genericHealthProducerEnabled,
+	}
+	if genericHealthProducerEnabled {
+		scw.healthListener, scw.unregisterHealthListener = producer.SwapRootListener(&healthListener{
+			b:  b,
+			sc: sc,
+		}, sc)
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -611,12 +666,15 @@ func min(x, y time.Duration) time.Duration {
 func (b *outlierDetectionBalancer) handleSubConnUpdate(u *scUpdate) {
 	scw := u.scw
 	scw.latestState = u.state
-	if !scw.ejected {
-		if scw.listener != nil {
-			b.childMu.Lock()
-			scw.listener(u.state)
-			b.childMu.Unlock()
-		}
+	if scw.ejected {
+		return
+	}
+	b.childMu.Lock()
+	defer b.childMu.Unlock()
+	if scw.genericHealthProducerEnabled {
+		scw.healthListener.OnStateChange(u.state)
+	} else if scw.listener != nil {
+		scw.listener(u.state)
 	}
 }
 
@@ -633,10 +691,12 @@ func (b *outlierDetectionBalancer) handleEjectedUpdate(u *ejectionUpdate) {
 			ConnectivityState: connectivity.TransientFailure,
 		}
 	}
-	if scw.listener != nil {
-		b.childMu.Lock()
+	b.childMu.Lock()
+	defer b.childMu.Unlock()
+	if scw.genericHealthProducerEnabled {
+		scw.healthListener.OnStateChange(stateToUpdate)
+	} else if scw.listener != nil {
 		scw.listener(stateToUpdate)
-		b.childMu.Unlock()
 	}
 }
 

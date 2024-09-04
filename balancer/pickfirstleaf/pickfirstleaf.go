@@ -56,6 +56,12 @@ var (
 	// Can be changed in init() if this balancer is to be registered as the default
 	// pickfirst.
 	Name = "pick_first_leaf"
+	// TODO(arjan-bal): This is a hack to inform Outlier Detection when the generic
+	// health check producer is being used, as opposed to suchannel health checking.
+	// Once dualstack is completed, healthchecking will be removed from the subchannel.
+	// Remove this when implementing the dualstack design.
+	GenericHealthProducerEnabledKey   = "generic_health_producer_enabled"
+	GenericHealthProducerEnabledValue = &struct{}{}
 )
 
 const logPrefix = "[pick-first-leaf-lb %p] "
@@ -121,7 +127,9 @@ func (b *pickfirstBalancer) newSCData(addr resolver.Address) (*scData, error) {
 		healthState:          balancer.SubConnState{ConnectivityState: connectivity.Idle},
 		addr:                 addr,
 	}
-	sc, err := b.cc.NewSubConn([]resolver.Address{addr}, balancer.NewSubConnOptions{
+	addrWithAttr := addr
+	addrWithAttr.Attributes = addr.Attributes.WithValue(GenericHealthProducerEnabledKey, GenericHealthProducerEnabledValue)
+	sc, err := b.cc.NewSubConn([]resolver.Address{addrWithAttr}, balancer.NewSubConnOptions{
 		StateListener: func(state balancer.SubConnState) {
 			// Store the state and delegate.
 			b.serializer.TrySchedule(func(_ context.Context) {

@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/attributes"
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/balancer/pickfirstleaf"
 	"google.golang.org/grpc/codes"
@@ -938,7 +939,10 @@ func (b *backendManager) stopAllExcept(index int) {
 func (b *backendManager) resolverAddrs() []resolver.Address {
 	addrs := make([]resolver.Address, len(b.backends))
 	for i, backend := range b.backends {
-		addrs[i] = resolver.Address{Addr: backend.Address}
+		addrs[i] = resolver.Address{
+			Addr:       backend.Address,
+			Attributes: attributes.New(pickfirstleaf.GenericHealthProducerEnabledKey, pickfirstleaf.GenericHealthProducerEnabledValue),
+		}
 	}
 	return addrs
 }
