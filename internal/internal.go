@@ -32,7 +32,8 @@ var (
 	// WithHealthCheckFunc is set by dialoptions.go
 	WithHealthCheckFunc any // func (HealthChecker) DialOption
 	// HealthCheckFunc is used to provide client-side LB channel health checking
-	HealthCheckFunc HealthChecker
+	HealthCheckFunc              HealthChecker
+	EnableHealthCheckViaProducer any // func(balancer.HealthCheckOptions, balancer.SubConn) func()
 	// BalancerUnregister is exported by package balancer to unregister a balancer.
 	BalancerUnregister func(name string)
 	// KeepaliveMinPingTime is the minimum ping interval.  This must be 10s by

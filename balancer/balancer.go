@@ -152,6 +152,8 @@ type SubConn interface {
 	// indicate the shutdown operation.  This may be delivered before
 	// in-progress RPCs are complete and the actual connection is closed.
 	Shutdown()
+	RegisterConnectivityListner(StateListener)
+	UnregisterConnectivityListner(StateListener)
 }
 
 // NewSubConnOptions contains options to create new SubConn.
@@ -261,6 +263,8 @@ type BuildOptions struct {
 	// metrics. Balancer implementations which do not register metrics on
 	// metrics registry and record on them can ignore this field.
 	MetricsRecorder estats.MetricsRecorder
+
+	HealthCheckOptions HealthCheckOptions
 }
 
 // Builder creates a balancer.
@@ -462,3 +466,15 @@ type ProducerBuilder interface {
 // other methods to provide additional functionality, e.g. configuration or
 // subscription registration.
 type Producer any
+
+type StateListener interface {
+	OnStateChange(SubConnState)
+}
+
+// HealthCheckOptions are the options to configure the health check producer.
+type HealthCheckOptions struct {
+	DisableHealthCheckDialOpt bool
+	ServiceName               func() string
+	HealthCheckFunc           internal.HealthChecker
+	EnableHealthCheck         bool
+}
