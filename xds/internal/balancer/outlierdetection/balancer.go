@@ -35,7 +35,7 @@ import (
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/balancer/pickfirstleaf"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/health/producer"
+	"google.golang.org/grpc/health/genericproducer"
 	"google.golang.org/grpc/internal/balancer/gracefulswitch"
 	"google.golang.org/grpc/internal/buffer"
 	"google.golang.org/grpc/internal/channelz"
@@ -530,7 +530,7 @@ func (b *outlierDetectionBalancer) NewSubConn(addrs []resolver.Address, opts bal
 		genericHealthProducerEnabled: genericHealthProducerEnabled,
 	}
 	if genericHealthProducerEnabled {
-		scw.healthListener, scw.unregisterHealthListener = producer.SwapRootListener(&healthListener{
+		scw.healthListener, scw.unregisterHealthListener = genericproducer.SwapRootListener(&healthListener{
 			b:  b,
 			sc: sc,
 		}, sc)

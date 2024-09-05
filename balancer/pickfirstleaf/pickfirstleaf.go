@@ -30,7 +30,7 @@ import (
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/grpclog"
-	"google.golang.org/grpc/health/producer"
+	"google.golang.org/grpc/health/genericproducer"
 	"google.golang.org/grpc/internal"
 	"google.golang.org/grpc/internal/envconfig"
 	internalgrpclog "google.golang.org/grpc/internal/grpclog"
@@ -491,7 +491,7 @@ func (b *pickfirstBalancer) updateSubConnState(sd *scData, state balancer.SubCon
 			pb:     b,
 		}
 		if sd.unregisterHealthListener == nil {
-			sd.unregisterHealthListener = producer.RegisterListener(hl, sd.subConn)
+			sd.unregisterHealthListener = genericproducer.RegisterListener(hl, sd.subConn)
 		} else {
 			// The health update may have already arrived.
 			b.updateSubConnHealthState(sd)

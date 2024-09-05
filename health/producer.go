@@ -8,7 +8,7 @@ import (
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/health/producer"
+	"google.golang.org/grpc/health/genericproducer"
 	"google.golang.org/grpc/internal"
 	"google.golang.org/grpc/status"
 )
@@ -110,7 +110,7 @@ func EnableHealthCheck(opts balancer.HealthCheckOptions, sc balancer.SubConn) fu
 		return closeFn
 	}
 	var closeGenericProducer func()
-	p.listener, closeGenericProducer = producer.SwapRootListener(&noOpListener{p: p}, sc)
+	p.listener, closeGenericProducer = genericproducer.SwapRootListener(&noOpListener{p: p}, sc)
 	ls := &subConnStateListener{
 		p: p,
 	}
