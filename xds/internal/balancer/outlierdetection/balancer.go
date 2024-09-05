@@ -355,9 +355,9 @@ func (b *outlierDetectionBalancer) updateSubConnState(sc balancer.SubConn, state
 		return
 	}
 	if state.ConnectivityState == connectivity.Shutdown {
-		if scw.unregisterHealthListener != nil {
-			scw.unregisterHealthListener()
-			scw.unregisterHealthListener = nil
+		if scw.closeHealthProducerFn != nil {
+			scw.closeHealthProducerFn()
+			scw.closeHealthProducerFn = nil
 		}
 		delete(b.scWrappers, scw.SubConn)
 	}
@@ -388,9 +388,9 @@ func (b *outlierDetectionBalancer) Close() {
 	}
 
 	for _, scw := range b.scWrappers {
-		if scw.unregisterHealthListener != nil {
-			scw.unregisterHealthListener()
-			scw.unregisterHealthListener = nil
+		if scw.closeHealthProducerFn != nil {
+			scw.closeHealthProducerFn()
+			scw.closeHealthProducerFn = nil
 		}
 	}
 }
@@ -499,6 +499,12 @@ func (b *outlierDetectionBalancer) NewSubConn(addrs []resolver.Address, opts bal
 	oldListener := opts.StateListener
 	if !genericHealthProducerEnabled {
 		opts.StateListener = func(state balancer.SubConnState) { b.updateSubConnState(sc, state) }
+	} else {
+		opts.StateListener = func(scs balancer.SubConnState) {
+			b.childMu.Lock()
+			oldListener(scs)
+			b.childMu.Unlock()
+		}
 	}
 	sc, err := b.cc.NewSubConn(addrs, opts)
 	if err != nil {
@@ -510,19 +516,23 @@ func (b *outlierDetectionBalancer) NewSubConn(addrs []resolver.Address, opts bal
 		scUpdateCh: b.scUpdateCh,
 	}
 	if genericHealthProducerEnabled {
-		healthListener, unregisterFn := genericproducer.SwapRootListener(&healthListener{
+		oldHL, closeHealthProducerFn := genericproducer.SwapRootListener(&healthListener{
 			b:  b,
 			sc: sc,
 		}, sc)
 		scw.listener = func(scs balancer.SubConnState) {
-			healthListener.OnStateChange(scs)
+			oldHL.OnStateChange(scs)
 		}
-		scw.unregisterHealthListener = unregisterFn
+		scw.closeHealthProducerFn = closeHealthProducerFn
 	} else {
 		scw.listener = oldListener
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.logger.Infof("Locked mu")
+	defer func() {
+		b.logger.Infof("UnLocked mu")
+		b.mu.Unlock()
+	}()
 	b.scWrappers[sc] = scw
 	if len(addrs) != 1 {
 		return scw, nil
