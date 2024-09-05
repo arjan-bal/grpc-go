@@ -59,6 +59,9 @@ func (*producerBuilder) Build(cci any) (balancer.Producer, func()) {
 		cc:                cci.(grpc.ClientConnInterface),
 		mu:                sync.Mutex{},
 		connectivityState: connectivity.Idle,
+		healthState: balancer.SubConnState{
+			ConnectivityState: connectivity.Idle,
+		},
 	}
 	return p, sync.OnceFunc(func() {
 		p.mu.Lock()
@@ -79,18 +82,23 @@ type healthServiceProducer struct {
 	cc                     grpc.ClientConnInterface
 	mu                     sync.Mutex
 	connectivityState      connectivity.State
+	healthState            balancer.SubConnState
 	subConnStateListener   balancer.StateListener
 	listener               balancer.StateListener
-	oldListener            balancer.StateListener
 	unregisterConnListener func()
 	opts                   *balancer.HealthCheckOptions
 	stopClientFn           func()
 	running                bool
 }
 
-type noOpListener struct{}
+type noOpListener struct {
+	p *healthServiceProducer
+}
 
 func (l *noOpListener) OnStateChange(_ balancer.SubConnState) {
+	l.p.mu.Lock()
+	defer l.p.mu.Unlock()
+	l.p.listener.OnStateChange(l.p.healthState)
 }
 
 func EnableHealthCheck(opts balancer.HealthCheckOptions, sc balancer.SubConn) func() {
@@ -102,7 +110,7 @@ func EnableHealthCheck(opts balancer.HealthCheckOptions, sc balancer.SubConn) fu
 		return closeFn
 	}
 	var closeGenericProducer func()
-	p.listener, closeGenericProducer = producer.SwapRootListener(&noOpListener{}, sc)
+	p.listener, closeGenericProducer = producer.SwapRootListener(&noOpListener{p: p}, sc)
 	ls := &subConnStateListener{
 		p: p,
 	}
@@ -117,15 +125,20 @@ func EnableHealthCheck(opts balancer.HealthCheckOptions, sc balancer.SubConn) fu
 	}
 }
 
+func (p *healthServiceProducer) updateHealthStateLocked(state balancer.SubConnState) {
+	p.healthState = state
+	p.listener.OnStateChange(state)
+}
+
 func (p *healthServiceProducer) startHealthCheckLocked() {
 	serviceName := p.opts.ServiceName()
 	if p.opts.DisableHealthCheckDialOpt || !p.opts.EnableHealthCheck || serviceName == "" {
-		p.listener.OnStateChange(balancer.SubConnState{ConnectivityState: connectivity.Ready})
+		p.updateHealthStateLocked(balancer.SubConnState{ConnectivityState: connectivity.Ready})
 		return
 	}
 	if p.opts.HealthCheckFunc == nil {
 		logger.Error("Health check is requested but health check function is not set.")
-		p.listener.OnStateChange(balancer.SubConnState{ConnectivityState: connectivity.Ready})
+		p.updateHealthStateLocked(balancer.SubConnState{ConnectivityState: connectivity.Ready})
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -140,7 +153,7 @@ func (p *healthServiceProducer) startHealthCheckLocked() {
 		if !p.running {
 			return
 		}
-		p.listener.OnStateChange(balancer.SubConnState{
+		p.updateHealthStateLocked(balancer.SubConnState{
 			ConnectivityState: state,
 			ConnectionError:   err,
 		})

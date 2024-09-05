@@ -142,14 +142,8 @@ func (b *pickfirstBalancer) newSCData(addr resolver.Address) (*scData, error) {
 		return nil, err
 	}
 	// Start the health check service if its configured.
-	closeHealSvcProd := func() {}
 	if internal.EnableHealthCheckViaProducer != nil {
-		closeHealSvcProd = internal.EnableHealthCheckViaProducer.(func(balancer.HealthCheckOptions, balancer.SubConn) func())(b.healthCheckOpts, sc)
-	}
-	closeGenProd := producer.StartHealthChecking(sc)
-	sd.closeHealthProducers = func() {
-		closeHealSvcProd()
-		closeGenProd()
+		sd.closeHealthProducers = internal.EnableHealthCheckViaProducer.(func(balancer.HealthCheckOptions, balancer.SubConn) func())(b.healthCheckOpts, sc)
 	}
 	sd.subConn = sc
 	return sd, nil

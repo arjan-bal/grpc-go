@@ -68,7 +68,6 @@ type producer struct {
 	serializer           *grpcsync.CallbackSerializer
 	rootListener         balancer.StateListener
 	broadcastingListener *broadcastingListner
-	started              bool
 }
 
 func RegisterListener(l balancer.StateListener, sc balancer.SubConn) func() {
@@ -79,26 +78,10 @@ func RegisterListener(l balancer.StateListener, sc balancer.SubConn) func() {
 		closeFn()
 	}
 	p.serializer.TrySchedule(func(ctx context.Context) {
-		if !p.started {
-			return
-		}
 		p.broadcastingListener.listeners[l] = true
 		l.OnStateChange(p.healthState)
 	})
 	return unregister
-}
-
-func StartHealthChecking(sc balancer.SubConn) func() {
-	pr, closeFn := sc.GetOrBuildProducer(producerBuilderSingleton)
-	p := pr.(*producer)
-	p.serializer.TrySchedule(func(ctx context.Context) {
-		if p.started {
-			return
-		}
-		p.started = true
-		p.rootListener.OnStateChange(p.healthState)
-	})
-	return closeFn
 }
 
 // Adds a Sender to beginning of the chain, gives the next sender in the chain to send
@@ -108,10 +91,6 @@ func SwapRootListener(newListener balancer.StateListener, sc balancer.SubConn) (
 	p := pr.(*producer)
 	senderCh := make(chan balancer.StateListener, 1)
 	p.serializer.ScheduleOr(func(ctx context.Context) {
-		if p.started {
-			logger.Error("Registering a health producer listener after the producer has already started.")
-			close(senderCh)
-		}
 		oldSender := p.rootListener
 		p.rootListener = newListener
 		senderCh <- oldSender
@@ -119,6 +98,13 @@ func SwapRootListener(newListener balancer.StateListener, sc balancer.SubConn) (
 		close(senderCh)
 	})
 	oldSender := <-senderCh
+	// Send an update on the root listener to allow the new producer to set
+	// update the state present in listener down the chain if required.
+	p.serializer.TrySchedule(func(ctx context.Context) {
+		p.rootListener.OnStateChange(balancer.SubConnState{
+			ConnectivityState: connectivity.Ready,
+		})
+	})
 	return oldSender, closeFn
 }
 
