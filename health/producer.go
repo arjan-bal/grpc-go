@@ -26,30 +26,41 @@ type connectivityStateListener struct {
 	p *healthServiceProducer
 }
 
-func (l *connectivityStateListener) OnStateChange(state balancer.SubConnState) {
+func (l *connectivityStateListener) OnStateChange(newState balancer.SubConnState) {
 	l.p.mu.Lock()
 	defer l.p.mu.Unlock()
 	defer func() {
-		// Propogate updates down the listener chain.
-		l.p.updateHealthStateLocked(l.p.healthState)
+		// Propagate updates down the listener chain.
+		l.p.updateStateLocked()
 	}()
-	prevState := l.p.connectivityState
-	l.p.connectivityState = state.ConnectivityState
-	if prevState == state.ConnectivityState {
+	if l.p.shutdown {
 		return
 	}
-	if prevState == connectivity.Ready {
-		// Connection failure, stop health check.
-		if l.p.stopClientFn != nil {
-			l.p.stopClientFn()
-			l.p.stopClientFn = nil
+	prevState := l.p.connectivityState
+	l.p.connectivityState = newState
+	if prevState.ConnectivityState == newState.ConnectivityState {
+		return
+	}
+	// If connectivity state is not READY.
+	if newState.ConnectivityState != connectivity.Ready {
+		// Stop the health check if it's running.
+		if l.p.currentAttemptMarker != nil {
+			// Connection failure, stop health check.
+			if l.p.stopClientFn != nil {
+				l.p.stopClientFn()
+				l.p.stopClientFn = nil
+			}
+			l.p.currentAttemptMarker = nil
 		}
-		l.p.currentAttemptMarker = nil
-		l.p.updateHealthStateLocked(balancer.SubConnState{
-			ConnectivityState: connectivity.Idle,
-		})
-	} else if state.ConnectivityState == connectivity.Ready {
-		l.p.startHealthCheckLocked()
+	} else {
+		// Start the client health check if not started.
+		if l.p.currentAttemptMarker == nil {
+			l.p.healthState = balancer.SubConnState{
+				ConnectivityState: connectivity.Connecting,
+				ConnectionError:   balancer.ErrNoSubConnAvailable,
+			}
+			l.p.startHealthCheckLocked()
+		}
 	}
 }
 
@@ -58,7 +69,7 @@ func (*producerBuilder) Build(cci any) (balancer.Producer, func()) {
 	p := &healthServiceProducer{
 		cc:                cci.(grpc.ClientConnInterface),
 		mu:                sync.Mutex{},
-		connectivityState: connectivity.Idle,
+		connectivityState: balancer.SubConnState{ConnectivityState: connectivity.Idle},
 		healthState: balancer.SubConnState{
 			ConnectivityState: connectivity.Idle,
 		},
@@ -66,7 +77,8 @@ func (*producerBuilder) Build(cci any) (balancer.Producer, func()) {
 	return p, sync.OnceFunc(func() {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		p.connectivityState = connectivity.Shutdown
+		p.shutdown = true
+		p.currentAttemptMarker = nil
 		if p.stopClientFn != nil {
 			p.stopClientFn()
 			p.stopClientFn = nil
@@ -75,19 +87,23 @@ func (*producerBuilder) Build(cci any) (balancer.Producer, func()) {
 			p.unregisterConnListener()
 			p.unregisterConnListener = nil
 		}
+		p.healthState = balancer.SubConnState{
+			ConnectivityState: connectivity.Ready,
+		}
 	})
 }
 
 type healthServiceProducer struct {
 	cc                     grpc.ClientConnInterface
 	mu                     sync.Mutex
-	connectivityState      connectivity.State
+	connectivityState      balancer.SubConnState
 	healthState            balancer.SubConnState
 	listener               balancer.StateListener
 	unregisterConnListener func()
 	opts                   *balancer.HealthCheckOptions
 	stopClientFn           func()
 	currentAttemptMarker   *struct{}
+	shutdown               bool
 }
 
 // EnableHealthCheck enabled the health check service client to perform health
@@ -97,8 +113,8 @@ func EnableHealthCheck(opts balancer.HealthCheckOptions, sc balancer.SubConn) fu
 	p := pr.(*healthServiceProducer)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.listener != nil || p.connectivityState == connectivity.Shutdown {
-		return closeFn
+	if p.listener != nil {
+		panic("Attempting to start health check multiple times on the same subchannel")
 	}
 	var closeGenericProducer func()
 	p.listener, closeGenericProducer = genericproducer.SwapRootListener(&connectivityStateListener{p: p}, sc)
@@ -116,20 +132,25 @@ func EnableHealthCheck(opts balancer.HealthCheckOptions, sc balancer.SubConn) fu
 	}
 }
 
-func (p *healthServiceProducer) updateHealthStateLocked(state balancer.SubConnState) {
-	p.healthState = state
-	p.listener.OnStateChange(state)
+func (p *healthServiceProducer) updateStateLocked() {
+	if p.connectivityState.ConnectivityState == connectivity.Ready {
+		p.listener.OnStateChange(p.healthState)
+	} else {
+		p.listener.OnStateChange(p.connectivityState)
+	}
 }
 
 func (p *healthServiceProducer) startHealthCheckLocked() {
+	marker := &struct{}{}
+	p.currentAttemptMarker = marker
 	serviceName := p.opts.ServiceName()
 	if p.opts.DisableHealthCheckDialOpt || !p.opts.EnableHealthCheck || serviceName == "" {
-		p.updateHealthStateLocked(balancer.SubConnState{ConnectivityState: connectivity.Ready})
+		p.healthState = balancer.SubConnState{ConnectivityState: connectivity.Ready}
 		return
 	}
 	if p.opts.HealthCheckFunc == nil {
 		logger.Error("Health check is requested but health check function is not set.")
-		p.updateHealthStateLocked(balancer.SubConnState{ConnectivityState: connectivity.Ready})
+		p.healthState = balancer.SubConnState{ConnectivityState: connectivity.Ready}
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -137,8 +158,6 @@ func (p *healthServiceProducer) startHealthCheckLocked() {
 	newStream := func(method string) (any, error) {
 		return p.cc.NewStream(ctx, &grpc.StreamDesc{ServerStreams: true}, method)
 	}
-	marker := &struct{}{}
-	p.currentAttemptMarker = marker
 
 	setConnectivityState := func(state connectivity.State, err error) {
 		p.mu.Lock()
@@ -146,10 +165,11 @@ func (p *healthServiceProducer) startHealthCheckLocked() {
 		if p.currentAttemptMarker != marker {
 			return
 		}
-		p.updateHealthStateLocked(balancer.SubConnState{
+		p.healthState = balancer.SubConnState{
 			ConnectivityState: state,
 			ConnectionError:   err,
-		})
+		}
+		p.updateStateLocked()
 	}
 
 	go func() {
