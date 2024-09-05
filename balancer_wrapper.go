@@ -289,8 +289,6 @@ func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolve
 		}
 		acbw.stateListener(scs)
 
-		acbw.mu.Lock()
-		defer acbw.mu.Unlock()
 		for lis := range acbw.connectivityListeners {
 			lis.OnStateChange(scs)
 		}
