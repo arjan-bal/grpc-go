@@ -71,7 +71,7 @@ func (*producerBuilder) Build(cci any) (balancer.Producer, func()) {
 		mu:                sync.Mutex{},
 		connectivityState: balancer.SubConnState{ConnectivityState: connectivity.Idle},
 		healthState: balancer.SubConnState{
-			ConnectivityState: connectivity.Idle,
+			ConnectivityState: connectivity.Connecting,
 		},
 	}
 	return p, sync.OnceFunc(func() {
@@ -83,10 +83,6 @@ func (*producerBuilder) Build(cci any) (balancer.Producer, func()) {
 			p.stopClientFn()
 			p.stopClientFn = nil
 		}
-		if p.unregisterConnListener != nil {
-			p.unregisterConnListener()
-			p.unregisterConnListener = nil
-		}
 		p.healthState = balancer.SubConnState{
 			ConnectivityState: connectivity.Ready,
 		}
@@ -94,16 +90,15 @@ func (*producerBuilder) Build(cci any) (balancer.Producer, func()) {
 }
 
 type healthServiceProducer struct {
-	cc                     grpc.ClientConnInterface
-	mu                     sync.Mutex
-	connectivityState      balancer.SubConnState
-	healthState            balancer.SubConnState
-	listener               balancer.StateListener
-	unregisterConnListener func()
-	opts                   *balancer.HealthCheckOptions
-	stopClientFn           func()
-	currentAttemptMarker   *struct{}
-	shutdown               bool
+	cc                   grpc.ClientConnInterface
+	mu                   sync.Mutex
+	connectivityState    balancer.SubConnState
+	healthState          balancer.SubConnState
+	listener             balancer.StateListener
+	opts                 *balancer.HealthCheckOptions
+	stopClientFn         func()
+	currentAttemptMarker *struct{}
+	shutdown             bool
 }
 
 // EnableHealthCheck enabled the health check service client to perform health
@@ -111,20 +106,13 @@ type healthServiceProducer struct {
 func EnableHealthCheck(opts balancer.HealthCheckOptions, sc balancer.SubConn) func() {
 	pr, closeFn := sc.GetOrBuildProducer(producerBuilderSingleton)
 	p := pr.(*healthServiceProducer)
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.listener != nil {
 		panic("Attempting to start health check multiple times on the same subchannel")
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	var closeGenericProducer func()
 	p.listener, closeGenericProducer = genericproducer.SwapRootListener(&connectivityStateListener{p: p}, sc)
-	ls := &connectivityStateListener{
-		p: p,
-	}
-	sc.RegisterConnectivityListner(ls)
-	p.unregisterConnListener = func() {
-		sc.UnregisterConnectivityListner(ls)
-	}
 	p.opts = &opts
 	return func() {
 		closeFn()

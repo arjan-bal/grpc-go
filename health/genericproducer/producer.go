@@ -53,18 +53,16 @@ func (*producerBuilder) Build(cci any) (balancer.Producer, func()) {
 	}
 	p.rootListener = p.broadcastingListener
 	return p, sync.OnceFunc(func() {
-		p.serializer.TrySchedule(func(_ context.Context) {
-			if len(p.broadcastingListener.listeners) > 0 {
-				logger.Errorf("Health Producer closing with %d listeners remaining in list", len(p.broadcastingListener.listeners))
-			}
-			p.broadcastingListener.listeners = nil
-			if p.sc != nil {
-				p.sc.UnregisterConnectivityListner(p.connectivityListener)
-				p.connectivityListener = nil
-			}
-		})
 		cancel()
 		<-p.serializer.Done()
+		if len(p.broadcastingListener.listeners) > 0 {
+			logger.Errorf("Health Producer closing with %d listeners remaining in list", len(p.broadcastingListener.listeners))
+		}
+		p.broadcastingListener.listeners = nil
+		if p.sc != nil {
+			p.sc.UnregisterConnectivityListner(p.connectivityListener)
+			p.connectivityListener = nil
+		}
 	})
 }
 
@@ -117,6 +115,12 @@ func RegisterListener(l balancer.StateListener, sc balancer.SubConn) func() {
 // to the registered listener in a passthrough manner by calling the returned
 // listener every time it received an update.
 func SwapRootListener(newListener balancer.StateListener, sc balancer.SubConn) (balancer.StateListener, func()) {
+	// closeFn can be called synchronously when consumer listeners are getting notified
+	// from the serializer.If the refcount falls to 0, it can use the producer
+	// to be closed. This requires the serializer queue to exit. So we can't
+	// let closeFn execute serially and block the serializer queue.
+	// We can queue closeFn to run on the serializer, but if its running on the
+	// serializer, the serializer can't exit! We run this in a separate thread.
 	pr, closeFn := sc.GetOrBuildProducer(producerBuilderSingleton)
 	p := pr.(*producer)
 	senderCh := make(chan balancer.StateListener, 1)
@@ -133,7 +137,9 @@ func SwapRootListener(newListener balancer.StateListener, sc balancer.SubConn) (
 	p.serializer.TrySchedule(func(_ context.Context) {
 		p.rootListener.OnStateChange(p.connectivityListener.connectivityState)
 	})
-	return oldSender, closeFn
+	return oldSender, func() {
+		go closeFn()
+	}
 }
 
 func (p *producer) unregisterListener(l balancer.StateListener) {
