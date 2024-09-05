@@ -65,6 +65,18 @@ func NewTestSubConn(id string) *TestSubConn {
 // UpdateAddresses is a no-op.
 func (tsc *TestSubConn) UpdateAddresses([]resolver.Address) {}
 
+// RegisterConnectivityListner registers a listener.
+func (tsc *TestSubConn) RegisterConnectivityListner(sl balancer.StateListener) {
+	oldLis := tsc.stateListener
+	tsc.stateListener = func(state balancer.SubConnState) {
+		oldLis(state)
+		sl.OnStateChange(state)
+	}
+}
+
+// UnregisterConnectivityListner is a no-op.
+func (tsc *TestSubConn) UnregisterConnectivityListner(_ balancer.StateListener) {}
+
 // Connect is a no-op.
 func (tsc *TestSubConn) Connect() {
 	tsc.connectCalled.Fire()
