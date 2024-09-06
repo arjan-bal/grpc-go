@@ -109,7 +109,7 @@ type healthServiceProducer struct {
 // by registering a listener with the generic health producer.
 // It returns a cleanup function that must be called once the health checking is
 // no longer required.
-func EnableHealthCheck(opts balancer.HealthCheckOptions, sc balancer.SubConn) func() {
+func EnableHealthCheck(opts *balancer.HealthCheckOptions, sc balancer.SubConn) func() {
 	pr, closeFn := sc.GetOrBuildProducer(producerBuilderSingleton)
 	p := pr.(*healthServiceProducer)
 	if p.listener != nil {
@@ -119,7 +119,7 @@ func EnableHealthCheck(opts balancer.HealthCheckOptions, sc balancer.SubConn) fu
 	defer p.mu.Unlock()
 	var closeGenericProducer func()
 	p.listener, closeGenericProducer = genericproducer.SwapRootListener(&connectivityStateListener{p: p}, sc)
-	p.opts = &opts
+	p.opts = opts
 	return func() {
 		closeFn()
 		closeGenericProducer()
@@ -137,8 +137,12 @@ func (p *healthServiceProducer) updateStateLocked() {
 func (p *healthServiceProducer) startHealthCheckLocked() {
 	marker := &struct{}{}
 	p.currentAttemptMarker = marker
-	serviceName := p.opts.ServiceName()
-	if p.opts.DisableHealthCheckDialOpt || serviceName == "" {
+	if p.opts.DisableHealthCheckDialOpt {
+		p.healthState = balancer.SubConnState{ConnectivityState: connectivity.Ready}
+		return
+	}
+	serviceName := p.opts.ServiceName
+	if serviceName == "" {
 		p.healthState = balancer.SubConnState{ConnectivityState: connectivity.Ready}
 		return
 	}

@@ -78,7 +78,6 @@ func (pickfirstBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions
 		serializerCancel:     cancel,
 		concludedState:       connectivity.Connecting,
 		rawConnectivityState: connectivity.Connecting,
-		healthCheckOpts:      opts.HealthCheckOptions,
 	}
 	b.logger = internalgrpclog.NewPrefixLogger(logger, fmt.Sprintf(logPrefix, b))
 	return b
@@ -177,7 +176,6 @@ type pickfirstBalancer struct {
 	subConns             *resolver.AddressMap // scData for active subonns mapped by address.
 	addressList          addressList
 	firstPass            bool
-	healthCheckOpts      balancer.HealthCheckOptions
 }
 
 func (b *pickfirstBalancer) ResolverError(err error) {

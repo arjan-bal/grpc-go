@@ -274,8 +274,6 @@ type BuildOptions struct {
 	// metrics. Balancer implementations which do not register metrics on
 	// metrics registry and record on them can ignore this field.
 	MetricsRecorder estats.MetricsRecorder
-
-	HealthCheckOptions HealthCheckOptions
 }
 
 // Builder creates a balancer.
@@ -482,9 +480,14 @@ type StateListener interface {
 	OnStateChange(SubConnState)
 }
 
+// HealthCheckOptsKey is the key for health check options in the resolver.Attributes
+// of ClientConnState.
+var HealthCheckOptsKey = &struct{}{}
+
 // HealthCheckOptions are the options to configure the health check producer.
 type HealthCheckOptions struct {
+	Blah                      string
 	DisableHealthCheckDialOpt bool
-	ServiceName               func() string
+	ServiceName               string
 	HealthCheckFunc           internal.HealthChecker
 }

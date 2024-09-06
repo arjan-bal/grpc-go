@@ -83,17 +83,6 @@ func newCCBalancerWrapper(cc *ClientConn) *ccBalancerWrapper {
 			ChannelzParent:  cc.channelz,
 			Target:          cc.parsedTarget,
 			MetricsRecorder: cc.metricsRecorderList,
-			HealthCheckOptions: balancer.HealthCheckOptions{
-				HealthCheckFunc:           cc.dopts.healthCheckFunc,
-				DisableHealthCheckDialOpt: cc.dopts.disableHealthCheck,
-				ServiceName: func() string {
-					cfg := cc.healthCheckConfig()
-					if cfg == nil {
-						return ""
-					}
-					return cfg.ServiceName
-				},
-			},
 		},
 		serializer:       grpcsync.NewCallbackSerializer(ctx),
 		serializerCancel: cancel,
@@ -117,6 +106,18 @@ func (ccb *ccBalancerWrapper) updateClientConnState(ccs *balancer.ClientConnStat
 			ccb.curBalancerName = name
 			channelz.Infof(logger, ccb.cc.channelz, "Channel switches to new LB policy %q", name)
 		}
+		cfg := ccb.cc.healthCheckConfig()
+		svcName := ""
+		if cfg != nil {
+			svcName = cfg.ServiceName
+		}
+		ccs.ResolverState.Attributes = ccs.ResolverState.Attributes.WithValue(balancer.HealthCheckOptsKey,
+			&balancer.HealthCheckOptions{
+				HealthCheckFunc:           ccb.cc.dopts.healthCheckFunc,
+				DisableHealthCheckDialOpt: ccb.cc.dopts.disableHealthCheck,
+				ServiceName:               svcName,
+			},
+		)
 		err := ccb.balancer.UpdateClientConnState(*ccs)
 		if logger.V(2) && err != nil {
 			logger.Infof("error from balancer.UpdateClientConnState: %v", err)

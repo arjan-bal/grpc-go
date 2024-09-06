@@ -83,7 +83,7 @@ func (w *wrappedCC) NewSubConn(addrs []resolver.Address, opts balancer.NewSubCon
 	if internal.EnableHealthCheckViaProducer == nil {
 		return sc, nil
 	}
-	cleanup := internal.EnableHealthCheckViaProducer.(func(balancer.HealthCheckOptions, balancer.SubConn) func())(w.b.opts, sc)
+	cleanup := internal.EnableHealthCheckViaProducer.(func(*balancer.HealthCheckOptions, balancer.SubConn) func())(w.b.opts, sc)
 	w.b.cleanups = append(w.b.cleanups, cleanup)
 	return sc, nil
 }
@@ -96,7 +96,6 @@ func (bb *healthCheckingPetiolePolicyBuilder) Build(cc balancer.ClientConn, opts
 	}
 	b := &healthCheckingPetiolePolicy{
 		Balancer: balancer.Get(pickfirst.Name).Build(wcc, opts),
-		opts:     opts.HealthCheckOptions,
 	}
 	wcc.b = b
 	return b
@@ -106,10 +105,17 @@ func (b *healthCheckingPetiolePolicyBuilder) Name() string {
 	return healthCheckingPetiolePolicyName
 }
 
+func (b *healthCheckingPetiolePolicy) UpdateClientConnState(state balancer.ClientConnState) error {
+	if val, ok := state.ResolverState.Attributes.Value(balancer.HealthCheckOptsKey).(*balancer.HealthCheckOptions); ok {
+		b.opts = val
+	}
+	return b.Balancer.UpdateClientConnState(state)
+}
+
 type healthCheckingPetiolePolicy struct {
 	balancer.Balancer
 	cleanups []func()
-	opts     balancer.HealthCheckOptions
+	opts     *balancer.HealthCheckOptions
 }
 
 func (p *healthCheckingPetiolePolicy) Close() {
