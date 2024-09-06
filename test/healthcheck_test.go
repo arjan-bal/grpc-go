@@ -69,13 +69,37 @@ func init() {
 	}
 }
 
+// wraps the clientconn to enable health checking in the created subconns.
+type wrappedCC struct {
+	b *healthCheckingPetiolePolicy
+	balancer.ClientConn
+}
+
+func (w *wrappedCC) NewSubConn(addrs []resolver.Address, opts balancer.NewSubConnOptions) (balancer.SubConn, error) {
+	sc, err := w.ClientConn.NewSubConn(addrs, opts)
+	if err != nil {
+		return sc, err
+	}
+	if internal.EnableHealthCheckViaProducer == nil {
+		return sc, nil
+	}
+	cleanup := internal.EnableHealthCheckViaProducer.(func(balancer.HealthCheckOptions, balancer.SubConn) func())(w.b.opts, sc)
+	w.b.cleanups = append(w.b.cleanups, cleanup)
+	return sc, nil
+}
+
 type healthCheckingPetiolePolicyBuilder struct{}
 
-func (b *healthCheckingPetiolePolicyBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
-	opts.HealthCheckOptions.EnableHealthCheck = true
-	return &healthCheckingPetiolePolicy{
-		balancer.Get(pickfirst.Name).Build(cc, opts),
+func (bb *healthCheckingPetiolePolicyBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
+	wcc := &wrappedCC{
+		ClientConn: cc,
 	}
+	b := &healthCheckingPetiolePolicy{
+		Balancer: balancer.Get(pickfirst.Name).Build(wcc, opts),
+		opts:     opts.HealthCheckOptions,
+	}
+	wcc.b = b
+	return b
 }
 
 func (b *healthCheckingPetiolePolicyBuilder) Name() string {
@@ -84,6 +108,15 @@ func (b *healthCheckingPetiolePolicyBuilder) Name() string {
 
 type healthCheckingPetiolePolicy struct {
 	balancer.Balancer
+	cleanups []func()
+	opts     balancer.HealthCheckOptions
+}
+
+func (p *healthCheckingPetiolePolicy) Close() {
+	for _, cl := range p.cleanups {
+		cl()
+	}
+	p.Balancer.Close()
 }
 
 func newTestHealthServer() *testHealthServer {

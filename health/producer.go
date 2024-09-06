@@ -138,7 +138,7 @@ func (p *healthServiceProducer) startHealthCheckLocked() {
 	marker := &struct{}{}
 	p.currentAttemptMarker = marker
 	serviceName := p.opts.ServiceName()
-	if p.opts.DisableHealthCheckDialOpt || !p.opts.EnableHealthCheck || serviceName == "" {
+	if p.opts.DisableHealthCheckDialOpt || serviceName == "" {
 		p.healthState = balancer.SubConnState{ConnectivityState: connectivity.Ready}
 		return
 	}

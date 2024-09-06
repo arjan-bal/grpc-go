@@ -141,12 +141,6 @@ func (b *pickfirstBalancer) newSCData(addr resolver.Address) (*scData, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Start the health check service if its configured.
-	if internal.EnableHealthCheckViaProducer != nil {
-		sd.closeHealthProducers = internal.EnableHealthCheckViaProducer.(func(balancer.HealthCheckOptions, balancer.SubConn) func())(b.healthCheckOpts, sc)
-	} else if b.healthCheckOpts.EnableHealthCheck {
-		b.logger.Errorf("Health check is requested but health check function is not set.")
-	}
 	sd.subConn = sc
 	return sd, nil
 }

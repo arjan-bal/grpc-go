@@ -487,5 +487,4 @@ type HealthCheckOptions struct {
 	DisableHealthCheckDialOpt bool
 	ServiceName               func() string
 	HealthCheckFunc           internal.HealthChecker
-	EnableHealthCheck         bool
 }
