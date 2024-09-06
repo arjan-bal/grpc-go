@@ -24,7 +24,7 @@ var producerBuilderSingleton *producerBuilder
 
 type broadcastingListner struct {
 	p         *producer
-	listeners map[balancer.StateListener]bool
+	listeners map[balancer.StateListener]int
 }
 
 func (l *broadcastingListner) OnStateChange(scs balancer.SubConnState) {
@@ -49,7 +49,7 @@ func (*producerBuilder) Build(cci any) (balancer.Producer, func()) {
 	p.connectivityListener = &connectivityListener{p: p}
 	p.broadcastingListener = &broadcastingListner{
 		p:         p,
-		listeners: make(map[balancer.StateListener]bool),
+		listeners: make(map[balancer.StateListener]int),
 	}
 	p.rootListener = p.broadcastingListener
 	return p, sync.OnceFunc(func() {
@@ -88,10 +88,16 @@ func (l *connectivityListener) OnStateChange(state balancer.SubConnState) {
 	})
 }
 
-// RegisterListener is used by health consumers to start listening for health
-// updates. It returns a function to unregister the listener and manage
-// ref counting. It must be called by consumers when they no longer required the
-// listener.
+// RegisterListener allows health consumers to start listening for health
+// updates till the ClientConn is closed. It is not guaranteed for listeners to
+// get an update when the subchannel transitions to SHUTDOWN.
+// It returns a function to unregister the listener and manage ref counting.
+// Listeners must be unregestered when they are no longer required. The listener
+// will get called with the present connectivity state before receiving any
+// other updates. If a listener is registered multiple times, it will receive each
+// update only once. The function returned by all the registration requests must be
+// called to finally unregister the listener. The listener will asynchronously
+// get all the updates that were queued before the unregisteration request came.
 func RegisterListener(l balancer.StateListener, sc balancer.SubConn) func() {
 	pr, closeFn := sc.GetOrBuildProducer(producerBuilderSingleton)
 	p := pr.(*producer)
@@ -104,16 +110,17 @@ func RegisterListener(l balancer.StateListener, sc balancer.SubConn) func() {
 			p.sc = sc
 			sc.RegisterConnectivityListner(p.connectivityListener)
 		}
-		p.broadcastingListener.listeners[l] = true
+		p.broadcastingListener.listeners[l]++
 		l.OnStateChange(p.healthState)
 	})
 	return unregister
 }
 
 // SwapRootListener sets the given listener as the root of the listener chain.
-// It returns the previous root of the chain. The producer must process calls
-// to the registered listener in a passthrough manner by calling the returned
-// listener every time it received an update.
+// It returns the previous root of the chain. The new root will be called with
+// the present connectivity state before any other updates are sent.
+// A cleanup function is also returned which must be called before the calling
+// producer/LB policy shuts down.
 func SwapRootListener(newListener balancer.StateListener, sc balancer.SubConn) (balancer.StateListener, func()) {
 	// closeFn can be called synchronously when consumer listeners are getting notified
 	// from the serializer.If the refcount falls to 0, it can use the producer
@@ -144,6 +151,9 @@ func SwapRootListener(newListener balancer.StateListener, sc balancer.SubConn) (
 
 func (p *producer) unregisterListener(l balancer.StateListener) {
 	p.serializer.TrySchedule(func(_ context.Context) {
-		delete(p.broadcastingListener.listeners, l)
+		p.broadcastingListener.listeners[l]--
+		if p.broadcastingListener.listeners[l] == 0 {
+			delete(p.broadcastingListener.listeners, l)
+		}
 	})
 }

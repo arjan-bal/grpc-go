@@ -152,7 +152,18 @@ type SubConn interface {
 	// indicate the shutdown operation.  This may be delivered before
 	// in-progress RPCs are complete and the actual connection is closed.
 	Shutdown()
+	// RegisterConnectivityListner allows producers to subscribe to subchannel
+	// connectivity state updates. Listener will get updates only till the ClientConn
+	// is closed. It is not guaranteed for listeners to get an update when the
+	// subchannel transitions to SHUTDOWN. Listeners should be unregestered
+	// when they are no longer required. The listener will get called with the
+	// present connectivity state before receiving any other updates.
+	// Registering a listener multiple times without unregistering is a no-op.
 	RegisterConnectivityListner(StateListener)
+	// UnregisterConnectivityListner allows producer to stop receiving updates
+	// on the given listener. If the listener was not previously registered, this
+	// is a no-op. The listener may still receive pending updates that came
+	// before the unregistration request.
 	UnregisterConnectivityListner(StateListener)
 }
 

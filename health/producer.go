@@ -33,6 +33,8 @@ func (l *connectivityStateListener) OnStateChange(newState balancer.SubConnState
 		// Propagate updates down the listener chain.
 		l.p.updateStateLocked()
 	}()
+	// Behave as as an identity function and pass on the connectivity updates
+	// down the listener chain.
 	if l.p.shutdown {
 		return
 	}
@@ -102,7 +104,11 @@ type healthServiceProducer struct {
 }
 
 // EnableHealthCheck enabled the health check service client to perform health
-// checks for the subchannel.
+// checks for the subchannel. It must be called at most once on a subchannel.
+// Once the health check service is enabled, consumers can receive its updates
+// by registering a listener with the generic health producer.
+// It returns a cleanup function that must be called once the health checking is
+// no longer required.
 func EnableHealthCheck(opts balancer.HealthCheckOptions, sc balancer.SubConn) func() {
 	pr, closeFn := sc.GetOrBuildProducer(producerBuilderSingleton)
 	p := pr.(*healthServiceProducer)

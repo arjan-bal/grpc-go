@@ -376,11 +376,15 @@ func (acbw *acBalancerWrapper) RegisterConnectivityListner(l balancer.StateListe
 		if ctx.Err() != nil || acbw.ccb.balancer == nil {
 			return
 		}
+		if acbw.connectivityListeners[l] {
+			return
+		}
 		acbw.connectivityListeners[l] = true
 		acbw.ac.mu.Lock()
-		defer acbw.ac.mu.Unlock()
+		state := acbw.ac.state
+		acbw.ac.mu.Unlock()
 		l.OnStateChange(balancer.SubConnState{
-			ConnectivityState: acbw.ac.state,
+			ConnectivityState: state,
 		})
 	})
 }
