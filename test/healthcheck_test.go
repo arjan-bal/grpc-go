@@ -69,60 +69,28 @@ func init() {
 	}
 }
 
-// wraps the clientconn to enable health checking in the created subconns.
-type wrappedCC struct {
-	b *healthCheckingPetiolePolicy
-	balancer.ClientConn
-}
-
-func (w *wrappedCC) NewSubConn(addrs []resolver.Address, opts balancer.NewSubConnOptions) (balancer.SubConn, error) {
-	sc, err := w.ClientConn.NewSubConn(addrs, opts)
-	if err != nil {
-		return sc, err
-	}
-	if internal.EnableHealthCheckViaProducer == nil {
-		return sc, nil
-	}
-	cleanup := internal.EnableHealthCheckViaProducer.(func(*balancer.HealthCheckOptions, balancer.SubConn) func())(w.b.opts, sc)
-	w.b.cleanups = append(w.b.cleanups, cleanup)
-	return sc, nil
-}
-
 type healthCheckingPetiolePolicyBuilder struct{}
 
 func (bb *healthCheckingPetiolePolicyBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
-	wcc := &wrappedCC{
-		ClientConn: cc,
-	}
 	b := &healthCheckingPetiolePolicy{
-		Balancer: balancer.Get(pickfirst.Name).Build(wcc, opts),
+		Balancer: balancer.Get(pickfirst.Name).Build(cc, opts),
 	}
-	wcc.b = b
 	return b
 }
 
-func (b *healthCheckingPetiolePolicyBuilder) Name() string {
+func (bb *healthCheckingPetiolePolicyBuilder) Name() string {
 	return healthCheckingPetiolePolicyName
 }
 
 func (b *healthCheckingPetiolePolicy) UpdateClientConnState(state balancer.ClientConnState) error {
-	if val, ok := state.ResolverState.Attributes.Value(balancer.HealthCheckOptsKey).(*balancer.HealthCheckOptions); ok {
-		b.opts = val
-	}
+	oldProd := state.SetHealthListener
+	state.SetHealthListener = health.ClientSideHealthProducer(&state.HealthCheckOptions, oldProd)
 	return b.Balancer.UpdateClientConnState(state)
 }
 
 type healthCheckingPetiolePolicy struct {
 	balancer.Balancer
-	cleanups []func()
-	opts     *balancer.HealthCheckOptions
-}
-
-func (p *healthCheckingPetiolePolicy) Close() {
-	for _, cl := range p.cleanups {
-		cl()
-	}
-	p.Balancer.Close()
+	opts *balancer.HealthCheckOptions
 }
 
 func newTestHealthServer() *testHealthServer {
@@ -197,11 +165,13 @@ func (s *testHealthServer) SetServingStatus(service string, status healthpb.Heal
 }
 
 func setupHealthCheckWrapper() (hcEnterChan chan struct{}, hcExitChan chan struct{}, wrapper internal.HealthChecker) {
-	hcEnterChan = make(chan struct{})
-	hcExitChan = make(chan struct{})
+	hcEnterChan = make(chan struct{}, 2)
+	hcExitChan = make(chan struct{}, 2)
 	wrapper = func(ctx context.Context, newStream func(string) (any, error), update func(connectivity.State, error), service string) error {
-		close(hcEnterChan)
-		defer close(hcExitChan)
+		hcEnterChan <- struct{}{}
+		defer func() {
+			hcExitChan <- struct{}{}
+		}()
 		return testHealthCheckFunc(ctx, newStream, update, service)
 	}
 	return
@@ -355,6 +325,9 @@ func (s) TestHealthCheckHealthServerNotRegistered(t *testing.T) {
 // In the case of a goaway received, the health check stream should be terminated and health check
 // function should exit.
 func (s) TestHealthCheckWithGoAway(t *testing.T) {
+	if envconfig.NewPickFirstEnabled {
+		t.Skip("New pickfirst doesn't exit when chan is IDLE.")
+	}
 	s, lis, ts := setupServer(t, nil)
 	ts.SetServingStatus("foo", healthpb.HealthCheckResponse_SERVING)
 
@@ -433,6 +406,9 @@ func (s) TestHealthCheckWithGoAway(t *testing.T) {
 }
 
 func (s) TestHealthCheckWithConnClose(t *testing.T) {
+	if envconfig.NewPickFirstEnabled {
+		t.Skip("New pickfirst doesn't exit when chan is IDLE.")
+	}
 	s, lis, ts := setupServer(t, nil)
 	ts.SetServingStatus("foo", healthpb.HealthCheckResponse_SERVING)
 
@@ -678,6 +654,9 @@ func (s) TestHealthCheckWithoutSetConnectivityStateCalledAddrConnShutDown(t *tes
 // closes the allowedToReset channel(since it has not been closed inside health check func) to unblock
 // onGoAway/onClose goroutine.
 func (s) TestHealthCheckWithoutSetConnectivityStateCalled(t *testing.T) {
+	if envconfig.NewPickFirstEnabled {
+		t.Skip("New pickfirst doesn't exit when chan is IDLE.")
+	}
 	watchFunc := func(s *testHealthServer, in *healthpb.HealthCheckRequest, stream healthgrpc.Health_WatchServer) error {
 		if in.Service != "delay" {
 			return status.Error(codes.FailedPrecondition,

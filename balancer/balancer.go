@@ -152,19 +152,6 @@ type SubConn interface {
 	// indicate the shutdown operation.  This may be delivered before
 	// in-progress RPCs are complete and the actual connection is closed.
 	Shutdown()
-	// RegisterConnectivityListner allows producers to subscribe to subchannel
-	// connectivity state updates. Listener will get updates only till the ClientConn
-	// is closed. It is not guaranteed for listeners to get an update when the
-	// subchannel transitions to SHUTDOWN. Listeners should be unregestered
-	// when they are no longer required. The listener will get called with the
-	// present connectivity state before receiving any other updates.
-	// Registering a listener multiple times without unregistering is a no-op.
-	RegisterConnectivityListner(StateListener)
-	// UnregisterConnectivityListner allows producer to stop receiving updates
-	// on the given listener. If the listener was not previously registered, this
-	// is a no-op. The listener may still receive pending updates that came
-	// before the unregistration request.
-	UnregisterConnectivityListner(StateListener)
 }
 
 // NewSubConnOptions contains options to create new SubConn.
@@ -453,6 +440,11 @@ type ClientConnState struct {
 	// The parsed load balancing configuration returned by the builder's
 	// ParseConfig method, if implemented.
 	BalancerConfig serviceconfig.LoadBalancingConfig
+	// HealthCheckOptions are the configuration for heath checking.
+	HealthCheckOptions HealthCheckOptions
+	// SetHealthListener sets the health listener to which health updates are
+	// are delivered.
+	SetHealthListener func(SubConn, func(SubConnState)) func()
 }
 
 // ErrBadResolverState may be returned by UpdateClientConnState to indicate a
@@ -476,18 +468,10 @@ type ProducerBuilder interface {
 // subscription registration.
 type Producer any
 
-type StateListener interface {
-	OnStateChange(SubConnState)
-}
-
-// HealthCheckOptsKey is the key for health check options in the resolver.Attributes
-// of ClientConnState.
-var HealthCheckOptsKey = &struct{}{}
-
 // HealthCheckOptions are the options to configure the health check producer.
 type HealthCheckOptions struct {
-	Blah                      string
 	DisableHealthCheckDialOpt bool
 	ServiceName               string
 	HealthCheckFunc           internal.HealthChecker
+	EnableHeathListener       bool
 }

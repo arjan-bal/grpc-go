@@ -30,7 +30,6 @@ import (
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/grpclog"
-	"google.golang.org/grpc/health/genericproducer"
 	"google.golang.org/grpc/internal"
 	"google.golang.org/grpc/internal/envconfig"
 	internalgrpclog "google.golang.org/grpc/internal/grpclog"
@@ -60,15 +59,15 @@ var (
 	// health check producer is being used, as opposed to suchannel health checking.
 	// Once dualstack is completed, healthchecking will be removed from the subchannel.
 	// Remove this when implementing the dualstack design.
-	GenericHealthProducerEnabledKey   = "generic_health_producer_enabled"
-	GenericHealthProducerEnabledValue = &struct{}{}
+	OutlierDetectionDisabledKey   = "generic_health_producer_enabled"
+	OutlierDetectionDisabledValue = &struct{}{}
 )
 
 const logPrefix = "[pick-first-leaf-lb %p] "
 
 type pickfirstBuilder struct{}
 
-func (pickfirstBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
+func (pickfirstBuilder) Build(cc balancer.ClientConn, _ balancer.BuildOptions) balancer.Balancer {
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &pickfirstBalancer{
 		cc:                   cc,
@@ -113,11 +112,10 @@ type scData struct {
 
 	// The following fields should only be accessed from a serializer callback
 	// to ensure synchronization.
-	rawConnectivityState     connectivity.State
-	healthState              balancer.SubConnState
-	lastErr                  error
-	unregisterHealthListener func()
-	closeHealthProducers     func()
+	rawConnectivityState connectivity.State
+	healthState          balancer.SubConnState
+	lastErr              error
+	closeFn              func()
 }
 
 func (b *pickfirstBalancer) newSCData(addr resolver.Address) (*scData, error) {
@@ -127,7 +125,7 @@ func (b *pickfirstBalancer) newSCData(addr resolver.Address) (*scData, error) {
 		addr:                 addr,
 	}
 	addrWithAttr := addr
-	addrWithAttr.Attributes = addr.Attributes.WithValue(GenericHealthProducerEnabledKey, GenericHealthProducerEnabledValue)
+	addrWithAttr.Attributes = addr.Attributes.WithValue(OutlierDetectionDisabledKey, OutlierDetectionDisabledValue)
 	sc, err := b.cc.NewSubConn([]resolver.Address{addrWithAttr}, balancer.NewSubConnOptions{
 		StateListener: func(state balancer.SubConnState) {
 			// Store the state and delegate.
@@ -141,19 +139,20 @@ func (b *pickfirstBalancer) newSCData(addr resolver.Address) (*scData, error) {
 		return nil, err
 	}
 	sd.subConn = sc
+	b.logger.Infof("Set health listener for subconn %v: %v", sc, b.setHealthListener)
+	sd.closeFn = b.setHealthListener(sc, func(state balancer.SubConnState) {
+		b.serializer.TrySchedule(func(context.Context) {
+			sd.healthState = state
+			b.updateSubConnHealthState(sd)
+		})
+
+	})
 	return sd, nil
 }
 
 func (sd *scData) cleanup() {
-	if sd.unregisterHealthListener != nil {
-		sd.unregisterHealthListener()
-		sd.unregisterHealthListener = nil
-	}
-	if sd.closeHealthProducers != nil {
-		sd.closeHealthProducers()
-		sd.closeHealthProducers = nil
-	}
 	sd.subConn.Shutdown()
+	sd.closeFn()
 }
 
 type pickfirstBalancer struct {
@@ -176,6 +175,7 @@ type pickfirstBalancer struct {
 	subConns             *resolver.AddressMap // scData for active subonns mapped by address.
 	addressList          addressList
 	firstPass            bool
+	setHealthListener    func(balancer.SubConn, func(balancer.SubConnState)) func()
 }
 
 func (b *pickfirstBalancer) ResolverError(err error) {
@@ -242,6 +242,8 @@ func (b *pickfirstBalancer) updateClientConnState(state balancer.ClientConnState
 	if b.logger.V(2) {
 		b.logger.Infof("Received new config %s, resolver state %s", pretty.ToJSON(cfg), pretty.ToJSON(state.ResolverState))
 	}
+	b.logger.Infof("Got set health listener in update: %v", state.SetHealthListener)
+	b.setHealthListener = state.SetHealthListener
 
 	newEndpoints := state.ResolverState.Endpoints
 	if len(newEndpoints) == 0 {
@@ -480,16 +482,8 @@ func (b *pickfirstBalancer) updateSubConnState(sd *scData, state balancer.SubCon
 			return
 		}
 		b.rawConnectivityState = connectivity.Ready
-		hl := &healthListener{
-			scData: sd,
-			pb:     b,
-		}
-		if sd.unregisterHealthListener == nil {
-			sd.unregisterHealthListener = genericproducer.RegisterListener(hl, sd.subConn)
-		} else {
-			// The health update may have already arrived.
-			b.updateSubConnHealthState(sd)
-		}
+		// The health update may have already arrived.
+		b.updateSubConnHealthState(sd)
 		return
 	}
 
@@ -729,16 +723,4 @@ func equalAddressIgnoringBalAttributes(a, b *resolver.Address) bool {
 	return a.Addr == b.Addr && a.ServerName == b.ServerName &&
 		a.Attributes.Equal(b.Attributes) &&
 		a.Metadata == b.Metadata
-}
-
-type healthListener struct {
-	pb     *pickfirstBalancer
-	scData *scData
-}
-
-func (hl *healthListener) OnStateChange(state balancer.SubConnState) {
-	hl.pb.serializer.TrySchedule(func(context.Context) {
-		hl.scData.healthState = state
-		hl.pb.updateSubConnHealthState(hl.scData)
-	})
 }

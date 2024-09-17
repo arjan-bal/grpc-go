@@ -35,7 +35,6 @@ import (
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/balancer/pickfirstleaf"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/health/genericproducer"
 	"google.golang.org/grpc/internal/balancer/gracefulswitch"
 	"google.golang.org/grpc/internal/buffer"
 	"google.golang.org/grpc/internal/channelz"
@@ -204,8 +203,9 @@ type outlierDetectionBalancer struct {
 	updateUnconditionally bool
 	numAddrsEjected       int // For fast calculations of percentage of addrs ejected
 
-	scUpdateCh     *buffer.Unbounded
-	pickerUpdateCh *buffer.Unbounded
+	scUpdateCh        *buffer.Unbounded
+	pickerUpdateCh    *buffer.Unbounded
+	oldHealthProducer func(balancer.SubConn, func(balancer.SubConnState)) func()
 }
 
 // noopConfig returns whether this balancer is configured with a logical no-op
@@ -259,6 +259,22 @@ func (b *outlierDetectionBalancer) onNoopConfig() {
 	}
 }
 
+func (b *outlierDetectionBalancer) setHealthListener(sc balancer.SubConn, lis func(balancer.SubConnState)) func() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	scw, ok := sc.(*subConnWrapper)
+	if !ok {
+		panic("sc wrapper not found for subconn")
+	}
+	sc = scw.SubConn
+	closeFn := b.oldHealthProducer(sc, func(scs balancer.SubConnState) {
+		b.logger.Infof("Got health update for sc %v: %v", sc, scs)
+		b.updateSubConnState(sc, scs)
+	})
+	scw.listener = lis
+	return closeFn
+}
+
 func (b *outlierDetectionBalancer) UpdateClientConnState(s balancer.ClientConnState) error {
 	lbCfg, ok := s.BalancerConfig.(*LBConfig)
 	if !ok {
@@ -288,6 +304,7 @@ func (b *outlierDetectionBalancer) UpdateClientConnState(s balancer.ClientConnSt
 	}
 
 	b.mu.Lock()
+	b.oldHealthProducer = s.SetHealthListener
 	// Inhibit child picker updates until this UpdateClientConnState() call
 	// completes. If needed, a picker update containing the no-op config bit
 	// determined from this config and most recent state from the child will be
@@ -323,8 +340,9 @@ func (b *outlierDetectionBalancer) UpdateClientConnState(s balancer.ClientConnSt
 
 	b.childMu.Lock()
 	err := b.child.UpdateClientConnState(balancer.ClientConnState{
-		ResolverState:  s.ResolverState,
-		BalancerConfig: b.cfg.ChildPolicy.Config,
+		ResolverState:     s.ResolverState,
+		BalancerConfig:    b.cfg.ChildPolicy.Config,
+		SetHealthListener: b.setHealthListener,
 	})
 	b.childMu.Unlock()
 
@@ -355,10 +373,6 @@ func (b *outlierDetectionBalancer) updateSubConnState(sc balancer.SubConn, state
 		return
 	}
 	if state.ConnectivityState == connectivity.Shutdown {
-		if scw.closeHealthProducerFn != nil {
-			scw.closeHealthProducerFn()
-			scw.closeHealthProducerFn = nil
-		}
 		delete(b.scWrappers, scw.SubConn)
 	}
 	b.scUpdateCh.Put(&scUpdate{
@@ -385,13 +399,6 @@ func (b *outlierDetectionBalancer) Close() {
 	defer b.mu.Unlock()
 	if b.intervalTimer != nil {
 		b.intervalTimer.Stop()
-	}
-
-	for _, scw := range b.scWrappers {
-		if scw.closeHealthProducerFn != nil {
-			scw.closeHealthProducerFn()
-			scw.closeHealthProducerFn = nil
-		}
 	}
 }
 
@@ -491,7 +498,7 @@ func (hl *healthListener) OnStateChange(state balancer.SubConnState) {
 func (b *outlierDetectionBalancer) NewSubConn(addrs []resolver.Address, opts balancer.NewSubConnOptions) (balancer.SubConn, error) {
 	// Determine if the generic health producer is being used.
 	genericHealthProducerEnabled := false
-	if len(addrs) == 1 && addrs[0].Attributes.Value(pickfirstleaf.GenericHealthProducerEnabledKey) == pickfirstleaf.GenericHealthProducerEnabledValue {
+	if len(addrs) == 1 && addrs[0].Attributes.Value(pickfirstleaf.OutlierDetectionDisabledKey) == pickfirstleaf.OutlierDetectionDisabledValue {
 		genericHealthProducerEnabled = true
 	}
 
@@ -515,24 +522,11 @@ func (b *outlierDetectionBalancer) NewSubConn(addrs []resolver.Address, opts bal
 		addresses:  addrs,
 		scUpdateCh: b.scUpdateCh,
 	}
-	if genericHealthProducerEnabled {
-		oldHL, closeHealthProducerFn := genericproducer.SwapRootListener(&healthListener{
-			b:  b,
-			sc: sc,
-		}, sc)
-		scw.listener = func(scs balancer.SubConnState) {
-			oldHL.OnStateChange(scs)
-		}
-		scw.closeHealthProducerFn = closeHealthProducerFn
-	} else {
+	if !genericHealthProducerEnabled {
 		scw.listener = oldListener
 	}
 	b.mu.Lock()
-	b.logger.Infof("Locked mu")
-	defer func() {
-		b.logger.Infof("UnLocked mu")
-		b.mu.Unlock()
-	}()
+	defer b.mu.Unlock()
 	b.scWrappers[sc] = scw
 	if len(addrs) != 1 {
 		return scw, nil

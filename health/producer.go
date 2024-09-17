@@ -2,157 +2,121 @@ package health
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/health/genericproducer"
 	"google.golang.org/grpc/internal"
+	"google.golang.org/grpc/internal/backoff"
+	ibackoff "google.golang.org/grpc/internal/backoff"
 	"google.golang.org/grpc/status"
 )
 
 func init() {
 	producerBuilderSingleton = &producerBuilder{}
-	internal.EnableHealthCheckViaProducer = EnableHealthCheck
+	internal.EnableHealthCheckViaProducer = ClientSideHealthProducer
 }
 
 type producerBuilder struct{}
 
 var producerBuilderSingleton *producerBuilder
 
-type connectivityStateListener struct {
-	p *healthServiceProducer
-}
-
-func (l *connectivityStateListener) OnStateChange(newState balancer.SubConnState) {
-	l.p.mu.Lock()
-	defer l.p.mu.Unlock()
-	defer func() {
-		// Propagate updates down the listener chain.
-		l.p.updateStateLocked()
-	}()
-	// Behave as as an identity function and pass on the connectivity updates
-	// down the listener chain.
-	if l.p.shutdown {
-		return
-	}
-	prevState := l.p.connectivityState
-	l.p.connectivityState = newState
-	if prevState.ConnectivityState == newState.ConnectivityState {
-		return
-	}
-	// If connectivity state is not READY.
-	if newState.ConnectivityState != connectivity.Ready {
-		// Stop the health check if it's running.
-		if l.p.currentAttemptMarker != nil {
-			// Connection failure, stop health check.
-			if l.p.stopClientFn != nil {
-				l.p.stopClientFn()
-				l.p.stopClientFn = nil
-			}
-			l.p.currentAttemptMarker = nil
-		}
-	} else {
-		// Start the client health check if not started.
-		if l.p.currentAttemptMarker == nil {
-			l.p.healthState = balancer.SubConnState{
-				ConnectivityState: connectivity.Connecting,
-				ConnectionError:   balancer.ErrNoSubConnAvailable,
-			}
-			l.p.startHealthCheckLocked()
-		}
-	}
-}
-
 // Build constructs and returns a producer and its cleanup function
 func (*producerBuilder) Build(cci any) (balancer.Producer, func()) {
 	p := &healthServiceProducer{
-		cc:                cci.(grpc.ClientConnInterface),
-		mu:                sync.Mutex{},
-		connectivityState: balancer.SubConnState{ConnectivityState: connectivity.Idle},
+		cc:   cci.(grpc.ClientConnInterface),
+		mu:   sync.Mutex{},
+		done: make(chan struct{}),
 		healthState: balancer.SubConnState{
 			ConnectivityState: connectivity.Connecting,
+			ConnectionError:   balancer.ErrNoSubConnAvailable,
 		},
+		// TODO: Wait for first connectivity update instead of relying on this
+		// initial value.
+		connectivityState: balancer.SubConnState{
+			ConnectivityState: connectivity.Idle,
+		},
+		cancel: func() {},
 	}
-	return p, sync.OnceFunc(func() {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		p.shutdown = true
-		p.currentAttemptMarker = nil
-		if p.stopClientFn != nil {
-			p.stopClientFn()
-			p.stopClientFn = nil
-		}
-		p.healthState = balancer.SubConnState{
-			ConnectivityState: connectivity.Ready,
-		}
-	})
+	return p, func() {
+		p.cancel()
+		<-p.done
+	}
 }
 
 type healthServiceProducer struct {
-	cc                   grpc.ClientConnInterface
-	mu                   sync.Mutex
-	connectivityState    balancer.SubConnState
-	healthState          balancer.SubConnState
-	listener             balancer.StateListener
-	opts                 *balancer.HealthCheckOptions
-	stopClientFn         func()
-	currentAttemptMarker *struct{}
-	shutdown             bool
+	cc                grpc.ClientConnInterface
+	mu                sync.Mutex
+	connectivityState balancer.SubConnState
+	healthState       balancer.SubConnState
+	cancel            func()
+	done              chan (struct{})
+	listener          func(balancer.SubConnState)
 }
 
-// EnableHealthCheck enabled the health check service client to perform health
-// checks for the subchannel. It must be called at most once on a subchannel.
-// Once the health check service is enabled, consumers can receive its updates
-// by registering a listener with the generic health producer.
-// It returns a cleanup function that must be called once the health checking is
-// no longer required.
-func EnableHealthCheck(opts *balancer.HealthCheckOptions, sc balancer.SubConn) func() {
-	pr, closeFn := sc.GetOrBuildProducer(producerBuilderSingleton)
-	p := pr.(*healthServiceProducer)
-	if p.listener != nil {
-		panic("Attempting to start health check multiple times on the same subchannel")
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	var closeGenericProducer func()
-	p.listener, closeGenericProducer = genericproducer.SwapRootListener(&connectivityStateListener{p: p}, sc)
-	p.opts = opts
-	return func() {
-		closeFn()
-		closeGenericProducer()
+// EnableHealthCheck enables the client side health checking on the subchannel.
+// It must be called at most once on a subchannel. Once the health check service
+// is enabled, consumers can receive its updates by registering a listener with
+// the generic health producer.
+func ClientSideHealthProducer(opts *balancer.HealthCheckOptions, oldProducer func(balancer.SubConn, func(balancer.SubConnState)) func()) func(balancer.SubConn, func(balancer.SubConnState)) func() {
+	return func(sc balancer.SubConn, oldLis func(balancer.SubConnState)) func() {
+		pr, closeFn := sc.GetOrBuildProducer(producerBuilderSingleton)
+		p := pr.(*healthServiceProducer)
+		if p.listener != nil {
+			panic("Attempting to start health check multiple times on the same subchannel")
+		}
+		p.listener = oldLis
+		oldCloseFn := oldProducer(sc, func(scs balancer.SubConnState) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.connectivityState = scs
+			p.updateStateLocked()
+		})
+		go p.startHealthCheck(opts)
+		return func() {
+			closeFn()
+			oldCloseFn()
+		}
 	}
 }
 
 func (p *healthServiceProducer) updateStateLocked() {
-	if p.connectivityState.ConnectivityState == connectivity.Ready {
-		p.listener.OnStateChange(p.healthState)
-	} else {
-		p.listener.OnStateChange(p.connectivityState)
+	if p.connectivityState.ConnectivityState != connectivity.Ready {
+		p.listener(p.connectivityState)
 	}
+	p.listener(p.healthState)
 }
 
-func (p *healthServiceProducer) startHealthCheckLocked() {
-	marker := &struct{}{}
-	p.currentAttemptMarker = marker
-	if p.opts.DisableHealthCheckDialOpt {
+func (p *healthServiceProducer) startHealthCheck(opts *balancer.HealthCheckOptions) {
+	defer close(p.done)
+	p.mu.Lock()
+	p.healthState = balancer.SubConnState{ConnectivityState: connectivity.Connecting}
+	p.updateStateLocked()
+	if opts.DisableHealthCheckDialOpt {
 		p.healthState = balancer.SubConnState{ConnectivityState: connectivity.Ready}
+		p.updateStateLocked()
+		p.mu.Unlock()
 		return
 	}
-	serviceName := p.opts.ServiceName
+	serviceName := opts.ServiceName
 	if serviceName == "" {
 		p.healthState = balancer.SubConnState{ConnectivityState: connectivity.Ready}
+		p.updateStateLocked()
+		p.mu.Unlock()
 		return
 	}
-	if p.opts.HealthCheckFunc == nil {
+	if opts.HealthCheckFunc == nil {
 		logger.Error("Health check is requested but health check function is not set.")
 		p.healthState = balancer.SubConnState{ConnectivityState: connectivity.Ready}
+		p.updateStateLocked()
+		p.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	p.stopClientFn = cancel
+	p.cancel = cancel
 	newStream := func(method string) (any, error) {
 		return p.cc.NewStream(ctx, &grpc.StreamDesc{ServerStreams: true}, method)
 	}
@@ -160,9 +124,6 @@ func (p *healthServiceProducer) startHealthCheckLocked() {
 	setConnectivityState := func(state connectivity.State, err error) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		if p.currentAttemptMarker != marker {
-			return
-		}
 		p.healthState = balancer.SubConnState{
 			ConnectivityState: state,
 			ConnectionError:   err,
@@ -170,15 +131,39 @@ func (p *healthServiceProducer) startHealthCheckLocked() {
 		p.updateStateLocked()
 	}
 
-	go func() {
-		err := p.opts.HealthCheckFunc(ctx, newStream, setConnectivityState, serviceName)
+	runStream := func() error {
+		// TODO: Make the client return backoff reset true of it managed to connect.
+		err := opts.HealthCheckFunc(ctx, newStream, setConnectivityState, serviceName)
 		if err == nil {
-			return
+			return nil
 		}
+		// Unimplemented, do not retry.
 		if status.Code(err) == codes.Unimplemented {
 			logger.Error("Subchannel health check is unimplemented at server side, thus health check is disabled\n")
-		} else {
-			logger.Errorf("Health checking failed: %v\n", err)
+			return err
 		}
-	}()
+
+		// Retry for all other errors.
+		if code := status.Code(err); code != codes.Unavailable && code != codes.Canceled {
+			// TODO: Unavailable and Canceled should also ideally log an error,
+			// but for now we receive them when shutting down the ClientConn
+			// (Unavailable if the stream hasn't started yet, and Canceled if it
+			// happens mid-stream).  Once we can determine the state or ensure
+			// the producer is stopped before the stream ends, we can log an
+			// error when it's not a natural shutdown.
+			logger.Error("Received unexpected stream error:", err)
+		}
+		if code := status.Code(err); code == codes.Unavailable {
+			return fmt.Errorf("Stream closed")
+		}
+		return nil
+	}
+	p.mu.Unlock()
+	backoff.RunF(ctx, runStream, ibackoff.DefaultExponential.Backoff)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.healthState = balancer.SubConnState{
+		ConnectivityState: connectivity.Shutdown,
+	}
+	p.updateStateLocked()
 }

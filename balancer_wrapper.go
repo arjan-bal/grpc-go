@@ -111,13 +111,19 @@ func (ccb *ccBalancerWrapper) updateClientConnState(ccs *balancer.ClientConnStat
 		if cfg != nil {
 			svcName = cfg.ServiceName
 		}
-		ccs.ResolverState.Attributes = ccs.ResolverState.Attributes.WithValue(balancer.HealthCheckOptsKey,
-			&balancer.HealthCheckOptions{
-				HealthCheckFunc:           ccb.cc.dopts.healthCheckFunc,
-				DisableHealthCheckDialOpt: ccb.cc.dopts.disableHealthCheck,
-				ServiceName:               svcName,
-			},
-		)
+		ccs.HealthCheckOptions = balancer.HealthCheckOptions{
+			HealthCheckFunc:           ccb.cc.dopts.healthCheckFunc,
+			DisableHealthCheckDialOpt: ccb.cc.dopts.disableHealthCheck,
+			ServiceName:               svcName,
+		}
+		ccs.SetHealthListener = func(_ balancer.SubConn, f func(balancer.SubConnState)) func() {
+			ccb.serializer.TrySchedule(func(_ context.Context) {
+				f(balancer.SubConnState{
+					ConnectivityState: connectivity.Ready,
+				})
+			})
+			return func() {}
+		}
 		err := ccb.balancer.UpdateClientConnState(*ccs)
 		if logger.V(2) && err != nil {
 			logger.Infof("error from balancer.UpdateClientConnState: %v", err)
@@ -195,11 +201,10 @@ func (ccb *ccBalancerWrapper) NewSubConn(addrs []resolver.Address, opts balancer
 		return nil, err
 	}
 	acbw := &acBalancerWrapper{
-		ccb:                   ccb,
-		ac:                    ac,
-		producers:             make(map[balancer.ProducerBuilder]*refCountedProducer),
-		stateListener:         opts.StateListener,
-		connectivityListeners: make(map[balancer.StateListener]bool),
+		ccb:           ccb,
+		ac:            ac,
+		producers:     make(map[balancer.ProducerBuilder]*refCountedProducer),
+		stateListener: opts.StateListener,
 	}
 	ac.acbw = acbw
 	return acbw, nil
@@ -269,9 +274,8 @@ type acBalancerWrapper struct {
 	ccb           *ccBalancerWrapper // read-only
 	stateListener func(balancer.SubConnState)
 
-	mu                    sync.Mutex
-	producers             map[balancer.ProducerBuilder]*refCountedProducer
-	connectivityListeners map[balancer.StateListener]bool
+	mu        sync.Mutex
+	producers map[balancer.ProducerBuilder]*refCountedProducer
 }
 
 // updateState is invoked by grpc to push a subConn state update to the
@@ -289,10 +293,6 @@ func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolve
 			setConnectedAddress(&scs, curAddr)
 		}
 		acbw.stateListener(scs)
-
-		for lis := range acbw.connectivityListeners {
-			lis.OnStateChange(scs)
-		}
 	})
 }
 
@@ -370,31 +370,4 @@ func (acbw *acBalancerWrapper) GetOrBuildProducer(pb balancer.ProducerBuilder) (
 		acbw.mu.Unlock()
 	}
 	return pData.producer, grpcsync.OnceFunc(unref)
-}
-
-func (acbw *acBalancerWrapper) RegisterConnectivityListner(l balancer.StateListener) {
-	acbw.ccb.serializer.TrySchedule(func(ctx context.Context) {
-		if ctx.Err() != nil || acbw.ccb.balancer == nil {
-			return
-		}
-		if acbw.connectivityListeners[l] {
-			return
-		}
-		acbw.connectivityListeners[l] = true
-		acbw.ac.mu.Lock()
-		state := acbw.ac.state
-		acbw.ac.mu.Unlock()
-		l.OnStateChange(balancer.SubConnState{
-			ConnectivityState: state,
-		})
-	})
-}
-
-func (acbw *acBalancerWrapper) UnregisterConnectivityListner(l balancer.StateListener) {
-	acbw.ccb.serializer.TrySchedule(func(ctx context.Context) {
-		if ctx.Err() != nil || acbw.ccb.balancer == nil {
-			return
-		}
-		delete(acbw.connectivityListeners, l)
-	})
 }

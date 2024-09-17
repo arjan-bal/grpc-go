@@ -30,7 +30,6 @@ import (
 // to help track the latest state update from the underlying SubConn, and also
 // whether or not this SubConn is ejected.
 type subConnWrapper struct {
-	closeHealthProducerFn func()
 	balancer.SubConn
 	listener func(balancer.SubConnState)
 

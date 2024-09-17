@@ -34,13 +34,14 @@ import (
 // TestSubConn implements the SubConn interface, to be used in tests.
 type TestSubConn struct {
 	balancer.SubConn
-	tcc           *BalancerClientConn // the CC that owns this SubConn
-	id            string
-	ConnectCh     chan struct{}
-	stateListener func(balancer.SubConnState)
-	connectCalled *grpcsync.Event
-	producers     map[balancer.ProducerBuilder]*refCountedProducer
-	mu            *sync.Mutex
+	tcc             *BalancerClientConn // the CC that owns this SubConn
+	id              string
+	ConnectCh       chan struct{}
+	stateListener   func(balancer.SubConnState)
+	connectCalled   *grpcsync.Event
+	producers       map[balancer.ProducerBuilder]*refCountedProducer
+	mu              *sync.Mutex
+	healthProdClose func()
 }
 
 type refCountedProducer struct {
@@ -53,29 +54,19 @@ type refCountedProducer struct {
 // should be created via TestClientConn.NewSubConn instead, but can be useful
 // for some tests.
 func NewTestSubConn(id string) *TestSubConn {
-	return &TestSubConn{
+	ret := &TestSubConn{
 		ConnectCh:     make(chan struct{}, 1),
 		connectCalled: grpcsync.NewEvent(),
 		id:            id,
 		mu:            &sync.Mutex{},
 		producers:     make(map[balancer.ProducerBuilder]*refCountedProducer),
 	}
+
+	return ret
 }
 
 // UpdateAddresses is a no-op.
 func (tsc *TestSubConn) UpdateAddresses([]resolver.Address) {}
-
-// RegisterConnectivityListner registers a listener.
-func (tsc *TestSubConn) RegisterConnectivityListner(sl balancer.StateListener) {
-	oldLis := tsc.stateListener
-	tsc.stateListener = func(state balancer.SubConnState) {
-		oldLis(state)
-		sl.OnStateChange(state)
-	}
-}
-
-// UnregisterConnectivityListner is a no-op.
-func (tsc *TestSubConn) UnregisterConnectivityListner(_ balancer.StateListener) {}
 
 // Connect is a no-op.
 func (tsc *TestSubConn) Connect() {
@@ -127,6 +118,7 @@ func (tsc *TestSubConn) UpdateState(state balancer.SubConnState) {
 // TestClientConn.
 func (tsc *TestSubConn) Shutdown() {
 	tsc.tcc.logger.Logf("SubConn %s: Shutdown", tsc)
+	tsc.healthProdClose()
 	select {
 	case tsc.tcc.ShutdownSubConnCh <- tsc:
 	default:
