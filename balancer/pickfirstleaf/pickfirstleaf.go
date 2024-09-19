@@ -59,8 +59,15 @@ var (
 	// health check producer is being used, as opposed to suchannel health checking.
 	// Once dualstack is completed, healthchecking will be removed from the subchannel.
 	// Remove this when implementing the dualstack design.
-	OutlierDetectionDisabledKey   = "generic_health_producer_enabled"
+	OutlierDetectionDisabledKey   = "outlier_detection_disabled"
 	OutlierDetectionDisabledValue = &struct{}{}
+
+	// EnableHealthListenerKey is the resolver state attributes key for making
+	// pickfirst listen to health updates when its under a petiole policy.
+	EnableHealthListenerKey = "generic_health_listener_enabled"
+	// EnableHealthListenerValue is the resolver state attributes value for making
+	// pickfirst listen to health updates when its under a petiole policy.
+	EnableHealthListenerValue = &struct{}{}
 )
 
 const logPrefix = "[pick-first-leaf-lb %p] "
@@ -70,13 +77,14 @@ type pickfirstBuilder struct{}
 func (pickfirstBuilder) Build(cc balancer.ClientConn, _ balancer.BuildOptions) balancer.Balancer {
 	ctx, cancel := context.WithCancel(context.Background())
 	b := &pickfirstBalancer{
-		cc:                   cc,
-		addressList:          addressList{},
-		subConns:             resolver.NewAddressMap(),
-		serializer:           grpcsync.NewCallbackSerializer(ctx),
-		serializerCancel:     cancel,
-		concludedState:       connectivity.Connecting,
-		rawConnectivityState: connectivity.Connecting,
+		cc:                    cc,
+		addressList:           addressList{},
+		subConns:              resolver.NewAddressMap(),
+		serializer:            grpcsync.NewCallbackSerializer(ctx),
+		serializerCancel:      cancel,
+		concludedState:        connectivity.Connecting,
+		rawConnectivityState:  connectivity.Connecting,
+		healthCheckingEnabled: false,
 	}
 	b.logger = internalgrpclog.NewPrefixLogger(logger, fmt.Sprintf(logPrefix, b))
 	return b
@@ -139,8 +147,7 @@ func (b *pickfirstBalancer) newSCData(addr resolver.Address) (*scData, error) {
 		return nil, err
 	}
 	sd.subConn = sc
-	b.logger.Infof("Set health listener for subconn %v: %v", sc, b.setHealthListener)
-	sd.closeFn = b.setHealthListener(sc, func(state balancer.SubConnState) {
+	sd.closeFn = b.cc.RegisterHealthListener(sc, func(state balancer.SubConnState) {
 		b.serializer.TrySchedule(func(context.Context) {
 			sd.healthState = state
 			b.updateSubConnHealthState(sd)
@@ -168,14 +175,14 @@ type pickfirstBalancer struct {
 	// The serializer is used to ensure synchronization of updates triggered
 	// from the idle picker and the already serialized resolver,
 	// subconn state updates.
-	serializer           *grpcsync.CallbackSerializer
-	serializerCancel     func()
-	concludedState       connectivity.State
-	rawConnectivityState connectivity.State
-	subConns             *resolver.AddressMap // scData for active subonns mapped by address.
-	addressList          addressList
-	firstPass            bool
-	setHealthListener    func(balancer.SubConn, func(balancer.SubConnState)) func()
+	serializer            *grpcsync.CallbackSerializer
+	serializerCancel      func()
+	concludedState        connectivity.State
+	rawConnectivityState  connectivity.State
+	healthCheckingEnabled bool
+	subConns              *resolver.AddressMap // scData for active subonns mapped by address.
+	addressList           addressList
+	firstPass             bool
 }
 
 func (b *pickfirstBalancer) ResolverError(err error) {
@@ -234,6 +241,7 @@ func (b *pickfirstBalancer) updateClientConnState(state balancer.ClientConnState
 		b.resolverError(errors.New("produced zero addresses"))
 		return balancer.ErrBadResolverState
 	}
+	b.healthCheckingEnabled = state.ResolverState.Attributes.Value(EnableHealthListenerKey) == EnableHealthListenerValue
 	cfg, ok := state.BalancerConfig.(pfConfig)
 	if state.BalancerConfig != nil && !ok {
 		return fmt.Errorf("pickfirst: received illegal BalancerConfig (type %T): %v: %w", state.BalancerConfig, state.BalancerConfig, balancer.ErrBadResolverState)
@@ -242,8 +250,6 @@ func (b *pickfirstBalancer) updateClientConnState(state balancer.ClientConnState
 	if b.logger.V(2) {
 		b.logger.Infof("Received new config %s, resolver state %s", pretty.ToJSON(cfg), pretty.ToJSON(state.ResolverState))
 	}
-	b.logger.Infof("Got set health listener in update: %v", state.SetHealthListener)
-	b.setHealthListener = state.SetHealthListener
 
 	newEndpoints := state.ResolverState.Endpoints
 	if len(newEndpoints) == 0 {

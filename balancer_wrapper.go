@@ -116,14 +116,6 @@ func (ccb *ccBalancerWrapper) updateClientConnState(ccs *balancer.ClientConnStat
 			DisableHealthCheckDialOpt: ccb.cc.dopts.disableHealthCheck,
 			ServiceName:               svcName,
 		}
-		ccs.SetHealthListener = func(_ balancer.SubConn, f func(balancer.SubConnState)) func() {
-			ccb.serializer.TrySchedule(func(_ context.Context) {
-				f(balancer.SubConnState{
-					ConnectivityState: connectivity.Ready,
-				})
-			})
-			return func() {}
-		}
 		err := ccb.balancer.UpdateClientConnState(*ccs)
 		if logger.V(2) && err != nil {
 			logger.Infof("error from balancer.UpdateClientConnState: %v", err)
@@ -223,6 +215,24 @@ func (ccb *ccBalancerWrapper) UpdateAddresses(sc balancer.SubConn, addrs []resol
 	acbw.UpdateAddresses(addrs)
 }
 
+func (ccb *ccBalancerWrapper) RegisterHealthListener(sc balancer.SubConn, f func(balancer.SubConnState)) func() {
+	acbw, ok := sc.(*acBalancerWrapper)
+	if !ok {
+		return func() {}
+	}
+	ccb.serializer.TrySchedule(func(ctx context.Context) {
+		if ctx.Err() != nil || acbw.ccb.balancer == nil {
+			return
+		}
+		if acbw.healthListener != nil {
+			return
+		}
+		acbw.healthListener = f
+		f(acbw.lastState)
+	})
+	return func() {}
+}
+
 func (ccb *ccBalancerWrapper) UpdateState(s balancer.State) {
 	ccb.cc.mu.Lock()
 	defer ccb.cc.mu.Unlock()
@@ -270,9 +280,11 @@ func (ccb *ccBalancerWrapper) Target() string {
 // acBalancerWrapper is a wrapper on top of ac for balancers.
 // It implements balancer.SubConn interface.
 type acBalancerWrapper struct {
-	ac            *addrConn          // read-only
-	ccb           *ccBalancerWrapper // read-only
-	stateListener func(balancer.SubConnState)
+	ac             *addrConn          // read-only
+	ccb            *ccBalancerWrapper // read-only
+	stateListener  func(balancer.SubConnState)
+	healthListener func(balancer.SubConnState)
+	lastState      balancer.SubConnState
 
 	mu        sync.Mutex
 	producers map[balancer.ProducerBuilder]*refCountedProducer
@@ -289,10 +301,14 @@ func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolve
 		// opts.StateListener is set, so this cannot ever be nil.
 		// TODO: delete this comment when UpdateSubConnState is removed.
 		scs := balancer.SubConnState{ConnectivityState: s, ConnectionError: err}
+		acbw.lastState = scs
 		if s == connectivity.Ready {
 			setConnectedAddress(&scs, curAddr)
 		}
 		acbw.stateListener(scs)
+		if acbw.healthListener != nil {
+			acbw.healthListener(scs)
+		}
 	})
 }
 

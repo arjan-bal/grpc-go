@@ -301,6 +301,13 @@ type balancerWrapper struct {
 	subconns  map[balancer.SubConn]bool // subconns created by this balancer
 }
 
+func (bw *balancerWrapper) RegisterHealthListener(sc balancer.SubConn, f func(balancer.SubConnState)) func() {
+	if bw != bw.gsb.latestBalancer() {
+		return func() {}
+	}
+	return bw.gsb.cc.RegisterHealthListener(sc, f)
+}
+
 // Close closes the underlying LB policy and shuts down the subconns it
 // created. bw must not be referenced via balancerCurrent or balancerPending in
 // gsb when called. gsb.mu must not be held.  Does not panic with a nil

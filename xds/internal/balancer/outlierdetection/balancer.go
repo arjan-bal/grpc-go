@@ -203,9 +203,8 @@ type outlierDetectionBalancer struct {
 	updateUnconditionally bool
 	numAddrsEjected       int // For fast calculations of percentage of addrs ejected
 
-	scUpdateCh        *buffer.Unbounded
-	pickerUpdateCh    *buffer.Unbounded
-	oldHealthProducer func(balancer.SubConn, func(balancer.SubConnState)) func()
+	scUpdateCh     *buffer.Unbounded
+	pickerUpdateCh *buffer.Unbounded
 }
 
 // noopConfig returns whether this balancer is configured with a logical no-op
@@ -259,7 +258,7 @@ func (b *outlierDetectionBalancer) onNoopConfig() {
 	}
 }
 
-func (b *outlierDetectionBalancer) setHealthListener(sc balancer.SubConn, lis func(balancer.SubConnState)) func() {
+func (b *outlierDetectionBalancer) RegisterHealthListener(sc balancer.SubConn, lis func(balancer.SubConnState)) func() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	scw, ok := sc.(*subConnWrapper)
@@ -267,7 +266,7 @@ func (b *outlierDetectionBalancer) setHealthListener(sc balancer.SubConn, lis fu
 		panic("sc wrapper not found for subconn")
 	}
 	sc = scw.SubConn
-	closeFn := b.oldHealthProducer(sc, func(scs balancer.SubConnState) {
+	closeFn := b.cc.RegisterHealthListener(sc, func(scs balancer.SubConnState) {
 		b.logger.Infof("Got health update for sc %v: %v", sc, scs)
 		b.updateSubConnState(sc, scs)
 	})
@@ -304,7 +303,6 @@ func (b *outlierDetectionBalancer) UpdateClientConnState(s balancer.ClientConnSt
 	}
 
 	b.mu.Lock()
-	b.oldHealthProducer = s.SetHealthListener
 	// Inhibit child picker updates until this UpdateClientConnState() call
 	// completes. If needed, a picker update containing the no-op config bit
 	// determined from this config and most recent state from the child will be
@@ -340,9 +338,8 @@ func (b *outlierDetectionBalancer) UpdateClientConnState(s balancer.ClientConnSt
 
 	b.childMu.Lock()
 	err := b.child.UpdateClientConnState(balancer.ClientConnState{
-		ResolverState:     s.ResolverState,
-		BalancerConfig:    b.cfg.ChildPolicy.Config,
-		SetHealthListener: b.setHealthListener,
+		ResolverState:  s.ResolverState,
+		BalancerConfig: b.cfg.ChildPolicy.Config,
 	})
 	b.childMu.Unlock()
 

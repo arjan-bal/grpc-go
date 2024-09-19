@@ -17,7 +17,7 @@ import (
 
 func init() {
 	producerBuilderSingleton = &producerBuilder{}
-	internal.EnableHealthCheckViaProducer = ClientSideHealthProducer
+	internal.RegisterClientHealthCheckListenerFunc = RegisterClientSideHealthCheckListenerFunc
 }
 
 type producerBuilder struct{}
@@ -57,11 +57,13 @@ type healthServiceProducer struct {
 	listener          func(balancer.SubConnState)
 }
 
-// EnableHealthCheck enables the client side health checking on the subchannel.
-// It must be called at most once on a subchannel. Once the health check service
-// is enabled, consumers can receive its updates by registering a listener with
-// the generic health producer.
-func ClientSideHealthProducer(opts *balancer.HealthCheckOptions, oldProducer func(balancer.SubConn, func(balancer.SubConnState)) func()) func(balancer.SubConn, func(balancer.SubConnState)) func() {
+type regFn = func(balancer.SubConn, func(balancer.SubConnState)) func()
+
+// RegisterClientSideHealthCheckListenerFunc returns a function to register a
+// listener for health updates via the health checking service.
+// At most one listener must be registered per subchannel.
+// It
+func RegisterClientSideHealthCheckListenerFunc(opts *balancer.HealthCheckOptions, oldRegFn regFn) regFn {
 	return func(sc balancer.SubConn, oldLis func(balancer.SubConnState)) func() {
 		pr, closeFn := sc.GetOrBuildProducer(producerBuilderSingleton)
 		p := pr.(*healthServiceProducer)
@@ -69,7 +71,7 @@ func ClientSideHealthProducer(opts *balancer.HealthCheckOptions, oldProducer fun
 			panic("Attempting to start health check multiple times on the same subchannel")
 		}
 		p.listener = oldLis
-		oldCloseFn := oldProducer(sc, func(scs balancer.SubConnState) {
+		oldCloseFn := oldRegFn(sc, func(scs balancer.SubConnState) {
 			p.mu.Lock()
 			defer p.mu.Unlock()
 			p.connectivityState = scs
@@ -95,13 +97,7 @@ func (p *healthServiceProducer) startHealthCheck(opts *balancer.HealthCheckOptio
 	p.mu.Lock()
 	p.healthState = balancer.SubConnState{ConnectivityState: connectivity.Connecting}
 	p.updateStateLocked()
-	if opts.DisableHealthCheckDialOpt {
-		p.healthState = balancer.SubConnState{ConnectivityState: connectivity.Ready}
-		p.updateStateLocked()
-		p.mu.Unlock()
-		return
-	}
-	serviceName := opts.ServiceName
+	serviceName := opts.HealthServiceName
 	if serviceName == "" {
 		p.healthState = balancer.SubConnState{ConnectivityState: connectivity.Ready}
 		p.updateStateLocked()

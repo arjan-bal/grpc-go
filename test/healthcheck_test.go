@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/balancer/pickfirst"
+	"google.golang.org/grpc/balancer/pickfirstleaf"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
@@ -72,8 +73,12 @@ func init() {
 type healthCheckingPetiolePolicyBuilder struct{}
 
 func (bb *healthCheckingPetiolePolicyBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
+	ccw := &petiolePolicyCCWrapper{
+		ClientConn: cc,
+	}
 	b := &healthCheckingPetiolePolicy{
-		Balancer: balancer.Get(pickfirst.Name).Build(cc, opts),
+		Balancer: balancer.Get(pickfirst.Name).Build(ccw, opts),
+		ccw:      ccw,
 	}
 	return b
 }
@@ -83,14 +88,23 @@ func (bb *healthCheckingPetiolePolicyBuilder) Name() string {
 }
 
 func (b *healthCheckingPetiolePolicy) UpdateClientConnState(state balancer.ClientConnState) error {
-	oldProd := state.SetHealthListener
-	state.SetHealthListener = health.ClientSideHealthProducer(&state.HealthCheckOptions, oldProd)
+	b.ccw.opts = state.HealthCheckOptions
+	state.ResolverState.Attributes = state.ResolverState.Attributes.WithValue(pickfirstleaf.EnableHealthListenerKey, pickfirstleaf.EnableHealthListenerValue)
 	return b.Balancer.UpdateClientConnState(state)
 }
 
 type healthCheckingPetiolePolicy struct {
 	balancer.Balancer
-	opts *balancer.HealthCheckOptions
+	ccw *petiolePolicyCCWrapper
+}
+
+type petiolePolicyCCWrapper struct {
+	balancer.ClientConn
+	opts balancer.HealthCheckOptions
+}
+
+func (ccw *petiolePolicyCCWrapper) RegisterHealthListener(sc balancer.SubConn, f func(balancer.SubConnState)) func() {
+	return health.RegisterClientSideHealthCheckListenerFunc(&ccw.opts, ccw.ClientConn.RegisterHealthListener)(sc, f)
 }
 
 func newTestHealthServer() *testHealthServer {

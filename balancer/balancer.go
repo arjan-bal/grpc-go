@@ -226,6 +226,10 @@ type ClientConn interface {
 	//
 	// Deprecated: Use the Target field in the BuildOptions instead.
 	Target() string
+
+	// RegisterHealthListener sets the health listener to which health updates are
+	// are delivered.
+	RegisterHealthListener(SubConn, func(SubConnState)) func()
 }
 
 // BuildOptions contains additional information for Build.
@@ -442,9 +446,6 @@ type ClientConnState struct {
 	BalancerConfig serviceconfig.LoadBalancingConfig
 	// HealthCheckOptions are the configuration for heath checking.
 	HealthCheckOptions HealthCheckOptions
-	// SetHealthListener sets the health listener to which health updates are
-	// are delivered.
-	SetHealthListener func(SubConn, func(SubConnState)) func()
 }
 
 // ErrBadResolverState may be returned by UpdateClientConnState to indicate a
@@ -470,8 +471,7 @@ type Producer any
 
 // HealthCheckOptions are the options to configure the health check producer.
 type HealthCheckOptions struct {
-	DisableHealthCheckDialOpt bool
-	ServiceName               string
-	HealthCheckFunc           internal.HealthChecker
-	EnableHeathListener       bool
+	// Name of the gRPC service running on the server for reporting health state.
+	HealthServiceName string
+	HealthCheckFunc   internal.HealthChecker
 }

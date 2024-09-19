@@ -162,6 +162,11 @@ func NewBalancerClientConn(t *testing.T) *BalancerClientConn {
 	}
 }
 
+// RegisterHealthListener is a no-op.
+func (tcc *BalancerClientConn) RegisterHealthListener(balancer.SubConn, func(balancer.SubConnState)) func() {
+	return func() {}
+}
+
 // NewSubConn creates a new SubConn.
 func (tcc *BalancerClientConn) NewSubConn(a []resolver.Address, o balancer.NewSubConnOptions) (balancer.SubConn, error) {
 	sc := &TestSubConn{

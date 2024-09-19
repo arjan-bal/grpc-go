@@ -941,7 +941,7 @@ func (b *backendManager) resolverAddrs() []resolver.Address {
 	for i, backend := range b.backends {
 		addrs[i] = resolver.Address{
 			Addr:       backend.Address,
-			Attributes: attributes.New(pickfirstleaf.GenericHealthProducerEnabledKey, pickfirstleaf.GenericHealthProducerEnabledValue),
+			Attributes: attributes.New(pickfirstleaf.OutlierDetectionDisabledKey, pickfirstleaf.OutlierDetectionDisabledValue),
 		}
 	}
 	return addrs
