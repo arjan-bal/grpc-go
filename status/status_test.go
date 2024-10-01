@@ -31,6 +31,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/protoadapt"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/runtime/protoiface"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 
@@ -357,6 +358,12 @@ func (s) TestStatus_ErrorDetails(t *testing.T) {
 		for i := range details {
 			if !proto.Equal(details[i].(protoreflect.ProtoMessage), tc.details[i].(protoreflect.ProtoMessage)) {
 				t.Fatalf("(%v).Details()[%d] = %+v, want %+v", str(s), i, details[i], tc.details[i])
+			}
+			if pbMsg, ok := details[i].(protoiface.MessageV1); ok {
+				// identify msg type and do type assertion
+				fmt.Println("Found message: ", pbMsg)
+			} else {
+				t.Fatalf("Message doesn't satisfy protoiface.MessageV1: %v", details[i])
 			}
 		}
 	}
