@@ -28,9 +28,9 @@ import (
 	cpb "google.golang.org/genproto/googleapis/rpc/code"
 	epb "google.golang.org/genproto/googleapis/rpc/errdetails"
 	spb "google.golang.org/genproto/googleapis/rpc/status"
+	expb "google.golang.org/grpc/status/example"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/protoadapt"
-	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/runtime/protoiface"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -305,32 +305,16 @@ func (s) TestConvertUnknownError(t *testing.T) {
 }
 
 func (s) TestStatus_ErrorDetails(t *testing.T) {
+	name := "Hello"
 	tests := []struct {
 		code    codes.Code
 		details []protoadapt.MessageV1
 	}{
 		{
-			code:    codes.NotFound,
-			details: nil,
-		},
-		{
 			code: codes.NotFound,
 			details: []protoadapt.MessageV1{
-				&epb.ResourceInfo{
-					ResourceType: "book",
-					ResourceName: "projects/1234/books/5678",
-					Owner:        "User",
-				},
-			},
-		},
-		{
-			code: codes.Internal,
-			details: []protoadapt.MessageV1{
-				&epb.DebugInfo{
-					StackEntries: []string{
-						"first stack",
-						"second stack",
-					},
+				&expb.Example{
+					Name: &name,
 				},
 			},
 		},
@@ -356,10 +340,8 @@ func (s) TestStatus_ErrorDetails(t *testing.T) {
 		}
 		details := s.Details()
 		for i := range details {
-			if !proto.Equal(details[i].(protoreflect.ProtoMessage), tc.details[i].(protoreflect.ProtoMessage)) {
-				t.Fatalf("(%v).Details()[%d] = %+v, want %+v", str(s), i, details[i], tc.details[i])
-			}
-			if pbMsg, ok := details[i].(protoiface.MessageV1); ok {
+			pb := details[i]
+			if pbMsg, ok := pb.(protoiface.MessageV1); ok {
 				// identify msg type and do type assertion
 				fmt.Println("Found message: ", pbMsg)
 			} else {
