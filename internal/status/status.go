@@ -147,8 +147,9 @@ func (s *Status) WithDetails(details ...protoadapt.MessageV1) (*Status, error) {
 	return &Status{s: p}, nil
 }
 
-// Details returns a slice of details messages attached to the status.
-// If a detail cannot be decoded, the error is returned in place of the detail.
+// Details returns a slice of details protoiface.MessageV1 messages attached
+// to the status. If a detail cannot be decoded, the error is returned in place
+// of the detail.
 func (s *Status) Details() []any {
 	if s == nil || s.s == nil {
 		return nil
@@ -160,7 +161,8 @@ func (s *Status) Details() []any {
 			details = append(details, err)
 			continue
 		}
-		details = append(details, detail)
+		adapted := protoadapt.MessageV1Of(detail)
+		details = append(details, adapted)
 	}
 	return details
 }
