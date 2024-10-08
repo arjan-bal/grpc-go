@@ -35,6 +35,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/protoadapt"
+	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
@@ -155,16 +156,33 @@ func (s *Status) Details() []any {
 		return nil
 	}
 	details := make([]any, 0, len(s.s.Details))
-	for _, any := range s.s.Details {
-		detail, err := any.UnmarshalNew()
+	for _, anyMsg := range s.s.Details {
+		msg, err := getMessageInstance(anyMsg)
 		if err != nil {
+			fmt.Println("Got err", err)
 			details = append(details, err)
 			continue
 		}
-		adapted := protoadapt.MessageV1Of(detail)
-		details = append(details, adapted)
+		anyMsg.UnmarshalTo(msg)
+		details = append(details, msg)
 	}
 	return details
+}
+
+func getMessageInstance(anyMsg *anypb.Any) (proto.Message, error) {
+	// Lookup the message type in the global registry
+	msgType, err := protoregistry.GlobalTypes.FindMessageByURL(anyMsg.TypeUrl)
+	if err != nil {
+		return nil, fmt.Errorf("could not find message type: %v", err)
+	}
+
+	// Create a new instance of the message type
+	msg := msgType.New().Interface()
+	if _, ok := msg.(protoadapt.MessageV1); !ok {
+		fmt.Println("Message doesn't implement V1 interface", msg)
+	}
+
+	return msg, nil
 }
 
 func (s *Status) String() string {
