@@ -73,6 +73,9 @@ retryConnection:
 		setConnectivityState(connectivity.Connecting, nil)
 		rawS, err := newStream(healthCheckMethod)
 		if err != nil {
+			if code := status.Code(err); code == codes.Unavailable {
+				return err
+			}
 			continue retryConnection
 		}
 

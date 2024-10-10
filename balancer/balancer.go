@@ -1,5 +1,5 @@
 /*
- *
+
  * Copyright 2017 gRPC authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -155,6 +155,11 @@ type SubConn interface {
 	// indicate the shutdown operation.  This may be delivered before
 	// in-progress RPCs are complete and the actual connection is closed.
 	Shutdown()
+	// RegisterHealthListener sets the health listener to which health updates are
+	// are delivered. A listener should be registered every time the SubConn's
+	// raw ConnectivityState changes. When the ConnectivityState is not Ready, no
+	// updates will be sent.
+	RegisterHealthListener(func(SubConnState)) func()
 }
 
 // NewSubConnOptions contains options to create new SubConn.

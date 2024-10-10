@@ -54,7 +54,7 @@ var (
 	// instead of the exiting pickfirst implementation. This can be enabled by
 	// setting the environment variable "GRPC_EXPERIMENTAL_ENABLE_NEW_PICK_FIRST"
 	// to "true".
-	NewPickFirstEnabled = boolFromEnv("GRPC_EXPERIMENTAL_ENABLE_NEW_PICK_FIRST", false)
+	NewPickFirstEnabled = boolFromEnv("GRPC_EXPERIMENTAL_ENABLE_NEW_PICK_FIRST", true)
 )
 
 func boolFromEnv(envVar string, def bool) bool {

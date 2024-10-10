@@ -48,6 +48,8 @@ type subConnWrapper struct {
 	// addresses is the list of address(es) this SubConn was created with to
 	// help support any change in address(es)
 	addresses []resolver.Address
+
+	bal *outlierDetectionBalancer
 }
 
 // eject causes the wrapper to report a state update with the TRANSIENT_FAILURE
@@ -71,4 +73,15 @@ func (scw *subConnWrapper) uneject() {
 
 func (scw *subConnWrapper) String() string {
 	return fmt.Sprintf("%+v", scw.addresses)
+}
+
+func (scw *subConnWrapper) RegisterHealthListener(lis func(balancer.SubConnState)) func() {
+	fmt.Println("Wrappers register func called.")
+	sc := scw.SubConn
+	closeFn := sc.RegisterHealthListener(func(scs balancer.SubConnState) {
+		scw.bal.logger.Infof("Got health update for sc %v: %v", sc, scs)
+		scw.bal.updateSubConnState(sc, scs)
+	})
+	scw.listener = lis
+	return closeFn
 }

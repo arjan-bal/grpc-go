@@ -33,6 +33,7 @@ import (
 	"unsafe"
 
 	"google.golang.org/grpc/balancer"
+	"google.golang.org/grpc/balancer/pickfirstleaf"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/internal/balancer/gracefulswitch"
 	"google.golang.org/grpc/internal/buffer"
@@ -466,10 +467,33 @@ func (b *outlierDetectionBalancer) UpdateState(s balancer.State) {
 	b.pickerUpdateCh.Put(s)
 }
 
+type healthListener struct {
+	b  *outlierDetectionBalancer
+	sc balancer.SubConn
+}
+
+func (hl *healthListener) OnStateChange(state balancer.SubConnState) {
+	hl.b.updateSubConnState(hl.sc, state)
+}
+
 func (b *outlierDetectionBalancer) NewSubConn(addrs []resolver.Address, opts balancer.NewSubConnOptions) (balancer.SubConn, error) {
+	// Determine if the generic health producer is being used.
+	genericHealthProducerEnabled := false
+	if len(addrs) == 1 && addrs[0].Attributes.Value(pickfirstleaf.OutlierDetectionDisabledKey) == pickfirstleaf.OutlierDetectionDisabledValue {
+		genericHealthProducerEnabled = true
+	}
+
 	var sc balancer.SubConn
 	oldListener := opts.StateListener
-	opts.StateListener = func(state balancer.SubConnState) { b.updateSubConnState(sc, state) }
+	if !genericHealthProducerEnabled {
+		opts.StateListener = func(state balancer.SubConnState) { b.updateSubConnState(sc, state) }
+	} else {
+		opts.StateListener = func(scs balancer.SubConnState) {
+			b.childMu.Lock()
+			oldListener(scs)
+			b.childMu.Unlock()
+		}
+	}
 	sc, err := b.cc.NewSubConn(addrs, opts)
 	if err != nil {
 		return nil, err
@@ -478,7 +502,10 @@ func (b *outlierDetectionBalancer) NewSubConn(addrs []resolver.Address, opts bal
 		SubConn:    sc,
 		addresses:  addrs,
 		scUpdateCh: b.scUpdateCh,
-		listener:   oldListener,
+		bal:        b,
+	}
+	if !genericHealthProducerEnabled {
+		scw.listener = oldListener
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -620,9 +647,12 @@ func (b *outlierDetectionBalancer) handleEjectedUpdate(u *ejectionUpdate) {
 		}
 	}
 	if scw.listener != nil {
+		fmt.Println("In ejected", stateToUpdate)
 		b.childMu.Lock()
 		scw.listener(stateToUpdate)
 		b.childMu.Unlock()
+	} else {
+		fmt.Println("scw.listener is nil")
 	}
 }
 

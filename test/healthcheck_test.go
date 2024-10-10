@@ -28,12 +28,16 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/balancer"
+	"google.golang.org/grpc/balancer/pickfirst"
+	"google.golang.org/grpc/balancer/pickfirstleaf"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/internal"
 	"google.golang.org/grpc/internal/channelz"
+	"google.golang.org/grpc/internal/envconfig"
 	"google.golang.org/grpc/internal/grpctest"
 	"google.golang.org/grpc/internal/testutils"
 	"google.golang.org/grpc/resolver"
@@ -46,7 +50,49 @@ import (
 	testpb "google.golang.org/grpc/interop/grpc_testing"
 )
 
-var testHealthCheckFunc = internal.HealthCheckFunc
+const healthCheckingPetiolePolicyName = "health_checking_petiole_policy"
+
+var (
+	testHealthCheckFunc = internal.HealthCheckFunc
+
+	// healthCheckTestPolicyName is the LB policy used for testing the health check
+	// service.
+	healthCheckTestPolicyName = "round_robin"
+)
+
+func init() {
+	balancer.Register(&healthCheckingPetiolePolicyBuilder{})
+	// Until dualstack changes are not implemented and round_robin doesn't
+	// delegate to pickfirst, we test a fake LB policy that delegates to pickfirst.
+	// to verify health checking works as expected through pickfirst.
+	if envconfig.NewPickFirstEnabled {
+		healthCheckTestPolicyName = healthCheckingPetiolePolicyName
+	}
+}
+
+type healthCheckingPetiolePolicyBuilder struct{}
+
+func (bb *healthCheckingPetiolePolicyBuilder) Build(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
+	b := &healthCheckingPetiolePolicy{
+		Balancer: balancer.Get(pickfirst.Name).Build(cc, opts),
+	}
+	return b
+}
+
+func (bb *healthCheckingPetiolePolicyBuilder) Name() string {
+	return healthCheckingPetiolePolicyName
+}
+
+func (b *healthCheckingPetiolePolicy) UpdateClientConnState(state balancer.ClientConnState) error {
+	state.ResolverState.Attributes = state.ResolverState.Attributes.WithValue(pickfirstleaf.EnableHealthListenerKey, pickfirstleaf.EnableHealthListenerValue)
+	return b.Balancer.UpdateClientConnState(state)
+}
+
+type healthCheckingPetiolePolicy struct {
+	balancer.Balancer
+}
+
+type healthListenerRegisterFn = func(balancer.SubConn, func(balancer.SubConnState)) func()
 
 func newTestHealthServer() *testHealthServer {
 	return newTestHealthServerWithWatchFunc(defaultWatchFunc)
@@ -120,11 +166,13 @@ func (s *testHealthServer) SetServingStatus(service string, status healthpb.Heal
 }
 
 func setupHealthCheckWrapper() (hcEnterChan chan struct{}, hcExitChan chan struct{}, wrapper internal.HealthChecker) {
-	hcEnterChan = make(chan struct{})
-	hcExitChan = make(chan struct{})
+	hcEnterChan = make(chan struct{}, 2)
+	hcExitChan = make(chan struct{}, 2)
 	wrapper = func(ctx context.Context, newStream func(string) (any, error), update func(connectivity.State, error), service string) error {
-		close(hcEnterChan)
-		defer close(hcExitChan)
+		hcEnterChan <- struct{}{}
+		defer func() {
+			hcExitChan <- struct{}{}
+		}()
 		return testHealthCheckFunc(ctx, newStream, update, service)
 	}
 	return
@@ -204,12 +252,12 @@ func (s) TestHealthCheckWatchStateChange(t *testing.T) {
 	cc, r := setupClient(t, nil)
 	r.UpdateState(resolver.State{
 		Addresses: []resolver.Address{{Addr: lis.Addr().String()}},
-		ServiceConfig: parseServiceConfig(t, r, `{
+		ServiceConfig: parseServiceConfig(t, r, fmt.Sprintf(`{
 	"healthCheckConfig": {
 		"serviceName": "foo"
 	},
-	"loadBalancingConfig": [{"round_robin":{}}]
-}`)})
+	"loadBalancingConfig": [{"%s":{}}]
+}`, healthCheckTestPolicyName))})
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
 	defer cancel()
@@ -259,12 +307,12 @@ func (s) TestHealthCheckHealthServerNotRegistered(t *testing.T) {
 	cc, r := setupClient(t, nil)
 	r.UpdateState(resolver.State{
 		Addresses: []resolver.Address{{Addr: lis.Addr().String()}},
-		ServiceConfig: parseServiceConfig(t, r, `{
+		ServiceConfig: parseServiceConfig(t, r, fmt.Sprintf(`{
 	"healthCheckConfig": {
 		"serviceName": "foo"
 	},
-	"loadBalancingConfig": [{"round_robin":{}}]
-}`)})
+	"loadBalancingConfig": [{"%s":{}}]
+}`, healthCheckTestPolicyName))})
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
 	defer cancel()
@@ -278,6 +326,9 @@ func (s) TestHealthCheckHealthServerNotRegistered(t *testing.T) {
 // In the case of a goaway received, the health check stream should be terminated and health check
 // function should exit.
 func (s) TestHealthCheckWithGoAway(t *testing.T) {
+	if envconfig.NewPickFirstEnabled {
+		t.Skip("New pickfirst doesn't exit when chan is IDLE.")
+	}
 	s, lis, ts := setupServer(t, nil)
 	ts.SetServingStatus("foo", healthpb.HealthCheckResponse_SERVING)
 
@@ -286,12 +337,12 @@ func (s) TestHealthCheckWithGoAway(t *testing.T) {
 	tc := testgrpc.NewTestServiceClient(cc)
 	r.UpdateState(resolver.State{
 		Addresses: []resolver.Address{{Addr: lis.Addr().String()}},
-		ServiceConfig: parseServiceConfig(t, r, `{
+		ServiceConfig: parseServiceConfig(t, r, fmt.Sprintf(`{
 	"healthCheckConfig": {
 		"serviceName": "foo"
 	},
-	"loadBalancingConfig": [{"round_robin":{}}]
-}`)})
+	"loadBalancingConfig": [{"%s":{}}]
+}`, healthCheckTestPolicyName))})
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
 	defer cancel()
@@ -356,6 +407,9 @@ func (s) TestHealthCheckWithGoAway(t *testing.T) {
 }
 
 func (s) TestHealthCheckWithConnClose(t *testing.T) {
+	if envconfig.NewPickFirstEnabled {
+		t.Skip("New pickfirst doesn't exit when chan is IDLE.")
+	}
 	s, lis, ts := setupServer(t, nil)
 	ts.SetServingStatus("foo", healthpb.HealthCheckResponse_SERVING)
 
@@ -364,12 +418,12 @@ func (s) TestHealthCheckWithConnClose(t *testing.T) {
 	tc := testgrpc.NewTestServiceClient(cc)
 	r.UpdateState(resolver.State{
 		Addresses: []resolver.Address{{Addr: lis.Addr().String()}},
-		ServiceConfig: parseServiceConfig(t, r, `{
+		ServiceConfig: parseServiceConfig(t, r, fmt.Sprintf(`{
 	"healthCheckConfig": {
 		"serviceName": "foo"
 	},
-	"loadBalancingConfig": [{"round_robin":{}}]
-}`)})
+	"loadBalancingConfig": [{"%s":{}}]
+}`, healthCheckTestPolicyName))})
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
 	defer cancel()
@@ -412,12 +466,12 @@ func (s) TestHealthCheckWithAddrConnDrain(t *testing.T) {
 	hcEnterChan, hcExitChan, testHealthCheckFuncWrapper := setupHealthCheckWrapper()
 	cc, r := setupClient(t, &clientConfig{testHealthCheckFuncWrapper: testHealthCheckFuncWrapper})
 	tc := testgrpc.NewTestServiceClient(cc)
-	sc := parseServiceConfig(t, r, `{
+	sc := parseServiceConfig(t, r, fmt.Sprintf(`{
 	"healthCheckConfig": {
 		"serviceName": "foo"
 	},
-	"loadBalancingConfig": [{"round_robin":{}}]
-}`)
+	"loadBalancingConfig": [{"%s":{}}]
+}`, healthCheckTestPolicyName))
 	r.UpdateState(resolver.State{
 		Addresses:     []resolver.Address{{Addr: lis.Addr().String()}},
 		ServiceConfig: sc,
@@ -494,12 +548,12 @@ func (s) TestHealthCheckWithClientConnClose(t *testing.T) {
 	tc := testgrpc.NewTestServiceClient(cc)
 	r.UpdateState(resolver.State{
 		Addresses: []resolver.Address{{Addr: lis.Addr().String()}},
-		ServiceConfig: parseServiceConfig(t, r, `{
+		ServiceConfig: parseServiceConfig(t, r, fmt.Sprintf(`{
 	"healthCheckConfig": {
 		"serviceName": "foo"
 	},
-	"loadBalancingConfig": [{"round_robin":{}}]
-}`)})
+	"loadBalancingConfig": [{"%s":{}}]
+}`, healthCheckTestPolicyName))})
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
 	defer cancel()
@@ -561,12 +615,12 @@ func (s) TestHealthCheckWithoutSetConnectivityStateCalledAddrConnShutDown(t *tes
 	// The serviceName "delay" is specially handled at server side, where response will not be sent
 	// back to client immediately upon receiving the request (client should receive no response until
 	// test ends).
-	sc := parseServiceConfig(t, r, `{
+	sc := parseServiceConfig(t, r, fmt.Sprintf(`{
 	"healthCheckConfig": {
 		"serviceName": "delay"
 	},
-	"loadBalancingConfig": [{"round_robin":{}}]
-}`)
+	"loadBalancingConfig": [{"%s":{}}]
+}`, healthCheckTestPolicyName))
 	r.UpdateState(resolver.State{
 		Addresses:     []resolver.Address{{Addr: lis.Addr().String()}},
 		ServiceConfig: sc,
@@ -601,7 +655,10 @@ func (s) TestHealthCheckWithoutSetConnectivityStateCalledAddrConnShutDown(t *tes
 // closes the allowedToReset channel(since it has not been closed inside health check func) to unblock
 // onGoAway/onClose goroutine.
 func (s) TestHealthCheckWithoutSetConnectivityStateCalled(t *testing.T) {
-	watchFunc := func(_ *testHealthServer, in *healthpb.HealthCheckRequest, stream healthgrpc.Health_WatchServer) error {
+	if envconfig.NewPickFirstEnabled {
+		t.Skip("New pickfirst doesn't exit when chan is IDLE.")
+	}
+	watchFunc := func(s *testHealthServer, in *healthpb.HealthCheckRequest, stream healthgrpc.Health_WatchServer) error {
 		if in.Service != "delay" {
 			return status.Error(codes.FailedPrecondition,
 				"this special Watch function only handles request with service name to be \"delay\"")
@@ -626,12 +683,12 @@ func (s) TestHealthCheckWithoutSetConnectivityStateCalled(t *testing.T) {
 	// test ends).
 	r.UpdateState(resolver.State{
 		Addresses: []resolver.Address{{Addr: lis.Addr().String()}},
-		ServiceConfig: parseServiceConfig(t, r, `{
+		ServiceConfig: parseServiceConfig(t, r, fmt.Sprintf(`{
 	"healthCheckConfig": {
 		"serviceName": "delay"
 	},
-	"loadBalancingConfig": [{"round_robin":{}}]
-}`)})
+	"loadBalancingConfig": [{"%s":{}}]
+}`, healthCheckTestPolicyName))})
 
 	select {
 	case <-hcExitChan:
@@ -667,12 +724,12 @@ func testHealthCheckDisableWithDialOption(t *testing.T, addr string) {
 	tc := testgrpc.NewTestServiceClient(cc)
 	r.UpdateState(resolver.State{
 		Addresses: []resolver.Address{{Addr: addr}},
-		ServiceConfig: parseServiceConfig(t, r, `{
+		ServiceConfig: parseServiceConfig(t, r, fmt.Sprintf(`{
 	"healthCheckConfig": {
 		"serviceName": "foo"
 	},
-	"loadBalancingConfig": [{"round_robin":{}}]
-}`)})
+	"loadBalancingConfig": [{"%s":{}}]
+}`, healthCheckTestPolicyName))})
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
 	defer cancel()
@@ -775,12 +832,12 @@ func (s) TestHealthCheckChannelzCountingCallSuccess(t *testing.T) {
 	_, r := setupClient(t, nil)
 	r.UpdateState(resolver.State{
 		Addresses: []resolver.Address{{Addr: lis.Addr().String()}},
-		ServiceConfig: parseServiceConfig(t, r, `{
+		ServiceConfig: parseServiceConfig(t, r, fmt.Sprintf(`{
 	"healthCheckConfig": {
 		"serviceName": "channelzSuccess"
 	},
-	"loadBalancingConfig": [{"round_robin":{}}]
-}`)})
+	"loadBalancingConfig": [{"%s":{}}]
+}`, healthCheckTestPolicyName))})
 
 	if err := verifyResultWithDelay(func() (bool, error) {
 		cm, _ := channelz.GetTopChannels(0, 0)
@@ -824,12 +881,12 @@ func (s) TestHealthCheckChannelzCountingCallFailure(t *testing.T) {
 	_, r := setupClient(t, nil)
 	r.UpdateState(resolver.State{
 		Addresses: []resolver.Address{{Addr: lis.Addr().String()}},
-		ServiceConfig: parseServiceConfig(t, r, `{
+		ServiceConfig: parseServiceConfig(t, r, fmt.Sprintf(`{
 	"healthCheckConfig": {
 		"serviceName": "channelzFailure"
 	},
-	"loadBalancingConfig": [{"round_robin":{}}]
-}`)})
+	"loadBalancingConfig": [{"%s":{}}]
+}`, healthCheckTestPolicyName))})
 
 	if err := verifyResultWithDelay(func() (bool, error) {
 		cm, _ := channelz.GetTopChannels(0, 0)
@@ -938,7 +995,15 @@ func testHealthCheckSuccess(t *testing.T, e env) {
 // TestHealthCheckFailure invokes the unary Check() RPC on the health server
 // with an expired context and expects the RPC to fail.
 func (s) TestHealthCheckFailure(t *testing.T) {
-	for _, e := range listTestEnv() {
+	envs := listTestEnv()
+	if envconfig.NewPickFirstEnabled {
+		envs = append([]env{
+			{name: "tcp-clear", network: "tcp", balancer: healthCheckTestPolicyName},
+			{name: "tcp-tls", network: "tcp", security: "tls", balancer: healthCheckTestPolicyName},
+		}, envs...)
+
+	}
+	for _, e := range envs {
 		testHealthCheckFailure(t, e)
 	}
 }

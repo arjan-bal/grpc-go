@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 
 	"google.golang.org/grpc/balancer"
@@ -32,22 +33,36 @@ import (
 
 // TestSubConn implements the SubConn interface, to be used in tests.
 type TestSubConn struct {
-	tcc           *BalancerClientConn // the CC that owns this SubConn
-	id            string
-	ConnectCh     chan struct{}
-	stateListener func(balancer.SubConnState)
-	connectCalled *grpcsync.Event
+	balancer.SubConn
+	tcc             *BalancerClientConn // the CC that owns this SubConn
+	id              string
+	ConnectCh       chan struct{}
+	stateListener   func(balancer.SubConnState)
+	connectCalled   *grpcsync.Event
+	producers       map[balancer.ProducerBuilder]*refCountedProducer
+	mu              *sync.Mutex
+	healthProdClose func()
+}
+
+type refCountedProducer struct {
+	producer balancer.Producer
+	refs     int    // number of current refs to the producer
+	close    func() // underlying producer's close function
 }
 
 // NewTestSubConn returns a newly initialized SubConn.  Typically, subconns
 // should be created via TestClientConn.NewSubConn instead, but can be useful
 // for some tests.
 func NewTestSubConn(id string) *TestSubConn {
-	return &TestSubConn{
+	ret := &TestSubConn{
 		ConnectCh:     make(chan struct{}, 1),
 		connectCalled: grpcsync.NewEvent(),
 		id:            id,
+		mu:            &sync.Mutex{},
+		producers:     make(map[balancer.ProducerBuilder]*refCountedProducer),
 	}
+
+	return ret
 }
 
 // UpdateAddresses is a no-op.
@@ -63,8 +78,31 @@ func (tsc *TestSubConn) Connect() {
 }
 
 // GetOrBuildProducer is a no-op.
-func (tsc *TestSubConn) GetOrBuildProducer(balancer.ProducerBuilder) (balancer.Producer, func()) {
-	return nil, nil
+func (tsc *TestSubConn) GetOrBuildProducer(builder balancer.ProducerBuilder) (balancer.Producer, func()) {
+	// Look up existing producer from this builder.
+	pData := tsc.producers[builder]
+	if pData == nil {
+		// Not found; create a new one and add it to the producers map.
+		p, close := builder.Build(tsc)
+		pData = &refCountedProducer{producer: p, close: close}
+		tsc.producers[builder] = pData
+	}
+	// Account for this new reference.
+	pData.refs++
+
+	// Return a cleanup function wrapped in a OnceFunc to remove this reference
+	// and delete the refCountedProducer from the map if the total reference
+	// count goes to zero.
+	unref := func() {
+		tsc.mu.Lock()
+		pData.refs--
+		if pData.refs == 0 {
+			defer pData.close() // Run outside the tsc mutex
+			delete(tsc.producers, builder)
+		}
+		tsc.mu.Unlock()
+	}
+	return pData.producer, grpcsync.OnceFunc(unref)
 }
 
 // UpdateState pushes the state to the listener, if one is registered.
@@ -80,6 +118,7 @@ func (tsc *TestSubConn) UpdateState(state balancer.SubConnState) {
 // TestClientConn.
 func (tsc *TestSubConn) Shutdown() {
 	tsc.tcc.logger.Logf("SubConn %s: Shutdown", tsc)
+	tsc.healthProdClose()
 	select {
 	case tsc.tcc.ShutdownSubConnCh <- tsc:
 	default:
@@ -123,6 +162,11 @@ func NewBalancerClientConn(t *testing.T) *BalancerClientConn {
 	}
 }
 
+// RegisterHealthListener is a no-op.
+func (tcc *BalancerClientConn) RegisterHealthListener(balancer.SubConn, func(balancer.SubConnState)) func() {
+	return func() {}
+}
+
 // NewSubConn creates a new SubConn.
 func (tcc *BalancerClientConn) NewSubConn(a []resolver.Address, o balancer.NewSubConnOptions) (balancer.SubConn, error) {
 	sc := &TestSubConn{
@@ -131,6 +175,8 @@ func (tcc *BalancerClientConn) NewSubConn(a []resolver.Address, o balancer.NewSu
 		ConnectCh:     make(chan struct{}, 1),
 		stateListener: o.StateListener,
 		connectCalled: grpcsync.NewEvent(),
+		mu:            &sync.Mutex{},
+		producers:     make(map[balancer.ProducerBuilder]*refCountedProducer),
 	}
 	tcc.subConnIdx++
 	tcc.logger.Logf("testClientConn: NewSubConn(%v, %+v) => %s", a, o, sc)

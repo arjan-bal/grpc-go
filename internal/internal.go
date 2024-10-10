@@ -32,7 +32,9 @@ var (
 	// WithHealthCheckFunc is set by dialoptions.go
 	WithHealthCheckFunc any // func (HealthChecker) DialOption
 	// HealthCheckFunc is used to provide client-side LB channel health checking
-	HealthCheckFunc HealthChecker
+	HealthCheckFunc                   HealthChecker
+	RegisterClientHealthCheckListener any // func(sc balancer.SubConn, opts balancer.HealthCheckOptions, listener func(balancer.SubConnState)) func()
+	UpdateHealthCheckOpts             any // func(balancer.SubConn, balancer.HealthCheckOptions) func()
 	// BalancerUnregister is exported by package balancer to unregister a balancer.
 	BalancerUnregister func(name string)
 	// KeepaliveMinPingTime is the minimum ping interval.  This must be 10s by
@@ -255,3 +257,11 @@ const (
 // It currently has an experimental suffix which would be removed once
 // end-to-end testing of the policy is completed.
 const RLSLoadBalancingPolicyName = "rls_experimental"
+
+// HealthCheckOptions are the options to configure the health check producer.
+type HealthCheckOptions struct {
+	// Name of the gRPC service running on the server for reporting health state.
+	// If the service name is empty, client side health checking will be disabled.
+	HealthServiceName string
+	HealthCheckFunc   HealthChecker
+}

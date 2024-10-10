@@ -56,6 +56,19 @@ var (
 	// It is changed to "pick_first" in init() if this balancer is to be
 	// registered as the default pickfirst.
 	Name = "pick_first_leaf"
+	// TODO(arjan-bal): This is a hack to inform Outlier Detection when the generic
+	// health check producer is being used, as opposed to suchannel health checking.
+	// Once dualstack is completed, healthchecking will be removed from the subchannel.
+	// Remove this when implementing the dualstack design.
+	outlierDetectionDisabledKey   = "outlier_detection_disabled"
+	outlierDetectionDisabledValue = &struct{}{}
+
+	// EnableHealthListenerKey is the resolver state attributes key for making
+	// pickfirst listen to health updates when its under a petiole policy.
+	EnableHealthListenerKey = "generic_health_listener_enabled"
+	// EnableHealthListenerValue is the resolver state attributes value for making
+	// pickfirst listen to health updates when its under a petiole policy.
+	EnableHealthListenerValue = &struct{}{}
 )
 
 // TODO: change to pick-first when this becomes the default pick_first policy.
@@ -65,11 +78,13 @@ type pickfirstBuilder struct{}
 
 func (pickfirstBuilder) Build(cc balancer.ClientConn, _ balancer.BuildOptions) balancer.Balancer {
 	b := &pickfirstBalancer{
-		cc:          cc,
-		addressList: addressList{},
-		subConns:    resolver.NewAddressMap(),
-		state:       connectivity.Connecting,
-		mu:          sync.Mutex{},
+		mu:                    sync.Mutex{},
+		cc:                    cc,
+		addressList:           addressList{},
+		subConns:              resolver.NewAddressMap(),
+		concludedState:        connectivity.Connecting,
+		rawConnectivityState:  connectivity.Connecting,
+		healthCheckingEnabled: false,
 	}
 	b.logger = internalgrpclog.NewPrefixLogger(logger, fmt.Sprintf(logPrefix, b))
 	return b
@@ -104,16 +119,23 @@ type scData struct {
 	subConn balancer.SubConn
 	addr    resolver.Address
 
-	state   connectivity.State
-	lastErr error
+	// The following fields should only be accessed from a serializer callback
+	// to ensure synchronization.
+	rawConnectivityState connectivity.State
+	healthState          balancer.SubConnState
+	lastErr              error
+	closeFn              func()
 }
 
 func (b *pickfirstBalancer) newSCData(addr resolver.Address) (*scData, error) {
 	sd := &scData{
-		state: connectivity.Idle,
-		addr:  addr,
+		rawConnectivityState: connectivity.Idle,
+		healthState:          balancer.SubConnState{ConnectivityState: connectivity.Idle},
+		addr:                 addr,
 	}
-	sc, err := b.cc.NewSubConn([]resolver.Address{addr}, balancer.NewSubConnOptions{
+	addrWithAttr := addr
+	addrWithAttr.Attributes = addr.Attributes.WithValue(outlierDetectionDisabledKey, outlierDetectionDisabledValue)
+	sc, err := b.cc.NewSubConn([]resolver.Address{addrWithAttr}, balancer.NewSubConnOptions{
 		StateListener: func(state balancer.SubConnState) {
 			b.updateSubConnState(sd, state)
 		},
@@ -122,7 +144,20 @@ func (b *pickfirstBalancer) newSCData(addr resolver.Address) (*scData, error) {
 		return nil, err
 	}
 	sd.subConn = sc
+	if b.healthCheckingEnabled {
+		fmt.Println("Registering a health listener in PF")
+		sd.closeFn = sd.subConn.RegisterHealthListener(func(state balancer.SubConnState) {
+			b.updateSubConnHealthState(sd, state)
+		})
+	}
 	return sd, nil
+}
+
+func (sd *scData) cleanup() {
+	sd.subConn.Shutdown()
+	if sd.closeFn != nil {
+		sd.closeFn()
+	}
 }
 
 type pickfirstBalancer struct {
@@ -134,13 +169,16 @@ type pickfirstBalancer struct {
 	// The mutex is used to ensure synchronization of updates triggered
 	// from the idle picker and the already serialized resolver,
 	// SubConn state updates.
-	mu    sync.Mutex
-	state connectivity.State
+	mu sync.Mutex
 	// scData for active subonns mapped by address.
 	subConns    *resolver.AddressMap
 	addressList addressList
 	firstPass   bool
 	numTF       int
+	// subconn state updates.
+	concludedState        connectivity.State
+	rawConnectivityState  connectivity.State
+	healthCheckingEnabled bool
 }
 
 // ResolverError is called by the ClientConn when the name resolver produces
@@ -159,14 +197,17 @@ func (b *pickfirstBalancer) resolverErrorLocked(err error) {
 	// The picker will not change since the balancer does not currently
 	// report an error. If the balancer hasn't received a single good resolver
 	// update yet, transition to TRANSIENT_FAILURE.
-	if b.state != connectivity.TransientFailure && b.addressList.size() > 0 {
+	if b.concludedState != connectivity.TransientFailure && b.addressList.size() > 0 {
 		if b.logger.V(2) {
 			b.logger.Infof("Ignoring resolver error because balancer is using a previous good update.")
 		}
 		return
 	}
 
-	b.cc.UpdateState(balancer.State{
+	b.closeSubConnsLocked()
+	b.addressList.updateAddrs(nil)
+	b.rawConnectivityState = connectivity.TransientFailure
+	b.updateBalancerState(balancer.State{
 		ConnectivityState: connectivity.TransientFailure,
 		Picker:            &picker{err: fmt.Errorf("name resolver error: %v", err)},
 	})
@@ -178,12 +219,13 @@ func (b *pickfirstBalancer) UpdateClientConnState(state balancer.ClientConnState
 	if len(state.ResolverState.Addresses) == 0 && len(state.ResolverState.Endpoints) == 0 {
 		// Cleanup state pertaining to the previous resolver state.
 		// Treat an empty address list like an error by calling b.ResolverError.
-		b.state = connectivity.TransientFailure
+		b.rawConnectivityState = connectivity.TransientFailure
 		b.closeSubConnsLocked()
 		b.addressList.updateAddrs(nil)
 		b.resolverErrorLocked(errors.New("produced zero addresses"))
 		return balancer.ErrBadResolverState
 	}
+	b.healthCheckingEnabled = state.ResolverState.Attributes.Value(EnableHealthListenerKey) == EnableHealthListenerValue
 	cfg, ok := state.BalancerConfig.(pfConfig)
 	if state.BalancerConfig != nil && !ok {
 		return fmt.Errorf("pickfirst: received illegal BalancerConfig (type %T): %v: %w", state.BalancerConfig, state.BalancerConfig, balancer.ErrBadResolverState)
@@ -240,7 +282,7 @@ func (b *pickfirstBalancer) UpdateClientConnState(state balancer.ClientConnState
 	prevAddr := b.addressList.currentAddress()
 	prevAddrsCount := b.addressList.size()
 	b.addressList.updateAddrs(newAddrs)
-	if b.state == connectivity.Ready && b.addressList.seekTo(prevAddr) {
+	if b.rawConnectivityState == connectivity.Ready && b.addressList.seekTo(prevAddr) {
 		return nil
 	}
 
@@ -249,18 +291,18 @@ func (b *pickfirstBalancer) UpdateClientConnState(state balancer.ClientConnState
 	// (but the new address list does not contain the ready SubConn) or
 	// CONNECTING, enter CONNECTING.
 	// We may be in TRANSIENT_FAILURE due to a previous empty address list,
-	// we should still enter CONNECTING because the sticky TF behaviour
-	//  mentioned in A62 applies only when the TRANSIENT_FAILURE is reported
-	// due to connectivity failures.
-	if b.state == connectivity.Ready || b.state == connectivity.Connecting || prevAddrsCount == 0 {
+	// we should still enter CONNECTING because the sticky TF behaviour mentioned
+	// in A62 applies only when the TRANSIENT_FAILURE is reported due to connectivity
+	// failures.
+	if b.rawConnectivityState == connectivity.Ready || b.rawConnectivityState == connectivity.Connecting || prevAddrsCount == 0 {
 		// Start connection attempt at first address.
-		b.state = connectivity.Connecting
-		b.cc.UpdateState(balancer.State{
+		b.rawConnectivityState = connectivity.Connecting
+		b.updateBalancerState(balancer.State{
 			ConnectivityState: connectivity.Connecting,
 			Picker:            &picker{err: balancer.ErrNoSubConnAvailable},
 		})
 		b.requestConnectionLocked()
-	} else if b.state == connectivity.TransientFailure {
+	} else if b.rawConnectivityState == connectivity.TransientFailure {
 		// If we're in TRANSIENT_FAILURE, we stay in TRANSIENT_FAILURE until
 		// we're READY. See A62.
 		b.requestConnectionLocked()
@@ -278,7 +320,7 @@ func (b *pickfirstBalancer) Close() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closeSubConnsLocked()
-	b.state = connectivity.Shutdown
+	b.rawConnectivityState = connectivity.Shutdown
 }
 
 // ExitIdle moves the balancer out of idle state. It can be called concurrently
@@ -287,7 +329,7 @@ func (b *pickfirstBalancer) Close() {
 func (b *pickfirstBalancer) ExitIdle() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.state == connectivity.Idle && b.addressList.currentAddress() == b.addressList.first() {
+	if b.rawConnectivityState == connectivity.Idle && b.addressList.currentAddress() == b.addressList.first() {
 		b.firstPass = true
 		b.requestConnectionLocked()
 	}
@@ -295,7 +337,7 @@ func (b *pickfirstBalancer) ExitIdle() {
 
 func (b *pickfirstBalancer) closeSubConnsLocked() {
 	for _, sd := range b.subConns.Values() {
-		sd.(*scData).subConn.Shutdown()
+		sd.(*scData).cleanup()
 	}
 	b.subConns = resolver.NewAddressMap()
 }
@@ -333,7 +375,7 @@ func (b *pickfirstBalancer) reconcileSubConnsLocked(newAddrs []resolver.Address)
 			continue
 		}
 		val, _ := b.subConns.Get(oldAddr)
-		val.(*scData).subConn.Shutdown()
+		val.(*scData).cleanup()
 		b.subConns.Delete(oldAddr)
 	}
 }
@@ -343,9 +385,10 @@ func (b *pickfirstBalancer) reconcileSubConnsLocked(newAddrs []resolver.Address)
 func (b *pickfirstBalancer) shutdownRemainingLocked(selected *scData) {
 	for _, v := range b.subConns.Values() {
 		sd := v.(*scData)
-		if sd.subConn != selected.subConn {
-			sd.subConn.Shutdown()
+		if sd.subConn == selected.subConn {
+			continue
 		}
+		sd.cleanup()
 	}
 	b.subConns = resolver.NewAddressMap()
 	b.subConns.Set(selected.addr, selected)
@@ -381,7 +424,7 @@ func (b *pickfirstBalancer) requestConnectionLocked() {
 		}
 
 		scd := sd.(*scData)
-		switch scd.state {
+		switch scd.rawConnectivityState {
 		case connectivity.Idle:
 			scd.subConn.Connect()
 		case connectivity.TransientFailure:
@@ -407,8 +450,8 @@ func (b *pickfirstBalancer) requestConnectionLocked() {
 func (b *pickfirstBalancer) updateSubConnState(sd *scData, newState balancer.SubConnState) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	oldState := sd.state
-	sd.state = newState.ConnectivityState
+	oldState := sd.rawConnectivityState
+	sd.rawConnectivityState = newState.ConnectivityState
 	// Previously relevant SubConns can still callback with state updates.
 	// To prevent pickers from returning these obsolete SubConns, this logic
 	// is included to check if the current list of active SubConns includes this
@@ -428,11 +471,14 @@ func (b *pickfirstBalancer) updateSubConnState(sd *scData, newState balancer.Sub
 			b.logger.Errorf("Address %q not found address list in  %v", sd.addr, b.addressList.addresses)
 			return
 		}
-		b.state = connectivity.Ready
-		b.cc.UpdateState(balancer.State{
-			ConnectivityState: connectivity.Ready,
-			Picker:            &picker{result: balancer.PickResult{SubConn: sd.subConn}},
-		})
+		b.rawConnectivityState = connectivity.Ready
+		if !b.healthCheckingEnabled {
+			fmt.Println("health check not enabled in pickfirst")
+			b.updateBalancerState(balancer.State{
+				ConnectivityState: connectivity.Ready,
+				Picker:            &picker{result: balancer.PickResult{SubConn: sd.subConn}},
+			})
+		}
 		return
 	}
 
@@ -442,13 +488,14 @@ func (b *pickfirstBalancer) updateSubConnState(sd *scData, newState balancer.Sub
 	// a transport is successfully created, but the connection fails
 	// before the SubConn can send the notification for READY. We treat
 	// this as a successful connection and transition to IDLE.
-	if (b.state == connectivity.Ready && newState.ConnectivityState != connectivity.Ready) || (oldState == connectivity.Connecting && newState.ConnectivityState == connectivity.Idle) {
+	if (b.rawConnectivityState == connectivity.Ready && newState.ConnectivityState != connectivity.Ready) || (oldState == connectivity.Connecting && newState.ConnectivityState == connectivity.Idle) {
 		// Once a transport fails, the balancer enters IDLE and starts from
 		// the first address when the picker is used.
 		b.shutdownRemainingLocked(sd)
-		b.state = connectivity.Idle
+		b.rawConnectivityState = connectivity.Idle
 		b.addressList.reset()
-		b.cc.UpdateState(balancer.State{
+		b.rawConnectivityState = connectivity.Idle
+		b.updateBalancerState(balancer.State{
 			ConnectivityState: connectivity.Idle,
 			Picker:            &idlePicker{exitIdle: sync.OnceFunc(b.ExitIdle)},
 		})
@@ -462,9 +509,9 @@ func (b *pickfirstBalancer) updateSubConnState(sd *scData, newState balancer.Sub
 			// TRANSIENT_FAILURE. If it's in TRANSIENT_FAILURE, stay in
 			// TRANSIENT_FAILURE until it's READY. See A62.
 			// If the balancer is already in CONNECTING, no update is needed.
-			if b.state == connectivity.Idle {
-				b.state = connectivity.Connecting
-				b.cc.UpdateState(balancer.State{
+			if b.rawConnectivityState == connectivity.Idle {
+				b.rawConnectivityState = connectivity.Connecting
+				b.updateBalancerState(balancer.State{
 					ConnectivityState: connectivity.Connecting,
 					Picker:            &picker{err: balancer.ErrNoSubConnAvailable},
 				})
@@ -493,16 +540,14 @@ func (b *pickfirstBalancer) updateSubConnState(sd *scData, newState balancer.Sub
 	case connectivity.TransientFailure:
 		b.numTF = (b.numTF + 1) % b.subConns.Len()
 		sd.lastErr = newState.ConnectionError
-		if b.numTF%b.subConns.Len() == 0 {
-			b.cc.UpdateState(balancer.State{
-				ConnectivityState: connectivity.TransientFailure,
-				Picker:            &picker{err: newState.ConnectionError},
-			})
-		}
-		// We don't need to request re-resolution since the SubConn already
-		// does that before reporting TRANSIENT_FAILURE.
-		// TODO: #7534 - Move re-resolution requests from SubConn into
-		// pick_first.
+		b.rawConnectivityState = connectivity.TransientFailure
+		b.updateBalancerState(balancer.State{
+			ConnectivityState: connectivity.TransientFailure,
+			Picker:            &picker{err: newState.ConnectionError},
+		})
+		// We don't need to request re-resolution since the subconn already does
+		// that before reporting TRANSIENT_FAILURE.
+		// TODO: #7534 - Move re-resolution requests from subconn into pick_first.
 	case connectivity.Idle:
 		sd.subConn.Connect()
 	}
@@ -511,19 +556,59 @@ func (b *pickfirstBalancer) updateSubConnState(sd *scData, newState balancer.Sub
 func (b *pickfirstBalancer) endFirstPassLocked(lastErr error) {
 	b.firstPass = false
 	b.numTF = 0
-	b.state = connectivity.TransientFailure
+	b.rawConnectivityState = connectivity.TransientFailure
 
 	b.cc.UpdateState(balancer.State{
 		ConnectivityState: connectivity.TransientFailure,
 		Picker:            &picker{err: lastErr},
 	})
-	// Start re-connecting all the SubConns that are already in IDLE.
-	for _, v := range b.subConns.Values() {
-		sd := v.(*scData)
-		if sd.state == connectivity.Idle {
-			sd.subConn.Connect()
-		}
+}
+
+func (b *pickfirstBalancer) updateSubConnHealthState(sd *scData, state balancer.SubConnState) {
+	fmt.Println("Got health update in PF", sd.healthState)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	sd.healthState = state
+	// Previously relevant subconns can still callback with state updates.
+	// To prevent pickers from returning these obsolete subconns, this logic
+	// is included to check if the current list of active subconns includes this
+	// subconn.
+	if activeSD, found := b.subConns.Get(sd.addr); !found || activeSD != sd {
+		return
 	}
+	switch state.ConnectivityState {
+	case connectivity.Ready:
+		b.updateBalancerState(balancer.State{
+			ConnectivityState: connectivity.Ready,
+			Picker:            &picker{result: balancer.PickResult{SubConn: sd.subConn}},
+		})
+	case connectivity.TransientFailure:
+		b.updateBalancerState(balancer.State{
+			ConnectivityState: connectivity.TransientFailure,
+			Picker:            &picker{err: fmt.Errorf("health check failure: %v", state.ConnectionError)},
+		})
+	case connectivity.Connecting:
+		// If we're in TRANSIENT_FAILURE, we stay in TRANSIENT_FAILURE until
+		// we're READY. See A62.
+		if b.concludedState == connectivity.TransientFailure {
+			return
+		}
+		// The health check will report CONNECTING once the raw connectivity state
+		// changes to READY. We can avoid sending a new picker since the balancer
+		// would already be in CONNECTING.
+		if b.concludedState == connectivity.Connecting {
+			return
+		}
+		b.updateBalancerState(balancer.State{
+			ConnectivityState: connectivity.Connecting,
+			Picker:            &picker{err: balancer.ErrNoSubConnAvailable},
+		})
+	}
+}
+
+func (b *pickfirstBalancer) updateBalancerState(newState balancer.State) {
+	b.concludedState = newState.ConnectivityState
+	b.cc.UpdateState(newState)
 }
 
 type picker struct {

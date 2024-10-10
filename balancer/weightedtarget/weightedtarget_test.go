@@ -197,6 +197,7 @@ func (s) TestWeightedTarget(t *testing.T) {
 
 	// Send subconn state change.
 	sc1 := <-cc.NewSubConnCh
+	defer sc1.Shutdown()
 	sc1.UpdateState(balancer.SubConnState{ConnectivityState: connectivity.Connecting})
 	<-cc.NewPickerCh
 	sc1.UpdateState(balancer.SubConnState{ConnectivityState: connectivity.Ready})
@@ -247,6 +248,7 @@ func (s) TestWeightedTarget(t *testing.T) {
 	scShutdown.UpdateState(balancer.SubConnState{ConnectivityState: connectivity.Shutdown})
 
 	sc2 := <-cc.NewSubConnCh
+	defer sc2.Shutdown()
 	sc2.UpdateState(balancer.SubConnState{ConnectivityState: connectivity.Connecting})
 	<-cc.NewPickerCh
 	sc2.UpdateState(balancer.SubConnState{ConnectivityState: connectivity.Ready})

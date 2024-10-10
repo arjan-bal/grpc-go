@@ -99,6 +99,7 @@ func (s) TestBalancerGroup_start_close(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		addrs := <-cc.NewSubConnAddrsCh
 		sc := <-cc.NewSubConnCh
+		defer sc.Shutdown()
 		m1[addrs[0]] = sc
 		sc.UpdateState(balancer.SubConnState{ConnectivityState: connectivity.Connecting})
 		sc.UpdateState(balancer.SubConnState{ConnectivityState: connectivity.Ready})
@@ -141,6 +142,7 @@ func (s) TestBalancerGroup_start_close(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		addrs := <-cc.NewSubConnAddrsCh
 		sc := <-cc.NewSubConnCh
+		defer sc.Shutdown()
 		m2[addrs[0]] = sc
 		sc.UpdateState(balancer.SubConnState{ConnectivityState: connectivity.Connecting})
 		sc.UpdateState(balancer.SubConnState{ConnectivityState: connectivity.Ready})
@@ -266,6 +268,12 @@ func initBalancerGroupForCachingTest(t *testing.T, idleCacheTimeout time.Duratio
 	if err := testutils.IsRoundRobin(want, testutils.SubConnFromPicker(p2)); err != nil {
 		t.Fatalf("want %v, got %v", want, err)
 	}
+
+	t.Cleanup(func() {
+		for _, val := range m1 {
+			val.Shutdown()
+		}
+	})
 
 	return gator, bg, cc, m1
 }

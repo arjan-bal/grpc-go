@@ -824,7 +824,10 @@ func (s) TestExitIdle(t *testing.T) {
 	}()
 	pendBal := gsb.balancerPending.Balancer.(*verifyBalancer)
 	for i := 0; i < 10; i++ {
-		pendBal.newSubConn([]resolver.Address{}, balancer.NewSubConnOptions{})
+		sc, err := pendBal.newSubConn([]resolver.Address{}, balancer.NewSubConnOptions{})
+		if err == nil {
+			defer sc.Shutdown()
+		}
 	}
 	<-done
 }
