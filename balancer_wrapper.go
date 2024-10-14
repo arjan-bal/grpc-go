@@ -189,7 +189,6 @@ func (ccb *ccBalancerWrapper) NewSubConn(addrs []resolver.Address, opts balancer
 		ac:            ac,
 		producers:     make(map[balancer.ProducerBuilder]*refCountedProducer),
 		producersMu:   sync.Mutex{},
-		healthMu:      sync.Mutex{},
 		stateListener: opts.StateListener,
 	}
 	ac.acbw = acbw
@@ -216,55 +215,61 @@ type listenerWrapper struct {
 func (acbw *acBalancerWrapper) RegisterHealthListener(listener func(balancer.SubConnState)) {
 	wrapper := &listenerWrapper{onUpdate: listener}
 	acbw.healthMu.Lock()
-	defer acbw.healthMu.Unlock()
 	acbw.healthListener = wrapper
-	if acbw.lastState.ConnectivityState != connectivity.Ready {
-		return
-	}
-	cfg := acbw.ccb.cc.healthCheckConfig()
-	svcName := ""
-	healthCheckEnabled := !acbw.ccb.cc.dopts.disableHealthCheck
-	if cfg == nil {
-		healthCheckEnabled = false
-	} else {
-		svcName = cfg.ServiceName
-	}
-	if !healthCheckEnabled || internal.RegisterClientHealthCheckListener == nil {
-		acbw.ccb.serializer.TrySchedule(func(ctx context.Context) {
-			if ctx.Err() != nil || acbw.ccb.balancer == nil {
-				return
-			}
-			acbw.healthMu.Lock()
-			defer acbw.healthMu.Unlock()
-
-			if acbw.healthListener != wrapper {
-				return
-			}
-			listener(acbw.lastState)
-		})
-		return
-	}
-	healthOpts := internal.HealthCheckOptions{
-		HealthCheckFunc:   acbw.ccb.cc.dopts.healthCheckFunc,
-		HealthServiceName: svcName,
-	}
-	updateFunc := func(state balancer.SubConnState) {
-		acbw.ccb.serializer.TrySchedule(func(ctx context.Context) {
-			if ctx.Err() != nil || acbw.ccb.balancer == nil {
-				return
-			}
-			if acbw.lastState.ConnectivityState != connectivity.Ready {
-				return
-			}
-			acbw.healthMu.Lock()
-			defer acbw.healthMu.Unlock()
-			if acbw.healthListener != wrapper {
-				return
-			}
-			listener(state)
-		})
-	}
-	internal.RegisterClientHealthCheckListener.(func(balancer.SubConn, internal.HealthCheckOptions, func(balancer.SubConnState)) func())(acbw, healthOpts, updateFunc)
+	acbw.healthMu.Unlock()
+	acbw.ccb.serializer.TrySchedule(func(ctx context.Context) {
+		if ctx.Err() != nil || acbw.ccb.balancer == nil {
+			return
+		}
+		if acbw.lastState.ConnectivityState != connectivity.Ready {
+			return
+		}
+		cfg := acbw.ccb.cc.healthCheckConfig()
+		svcName := ""
+		healthCheckEnabled := !acbw.ccb.cc.dopts.disableHealthCheck
+		if cfg == nil {
+			healthCheckEnabled = false
+		} else {
+			svcName = cfg.ServiceName
+		}
+		if !healthCheckEnabled || internal.RegisterClientHealthCheckListener == nil {
+			acbw.ccb.serializer.TrySchedule(func(ctx context.Context) {
+				if ctx.Err() != nil || acbw.ccb.balancer == nil {
+					return
+				}
+				acbw.healthMu.Lock()
+				currentLis := acbw.healthListener
+				acbw.healthMu.Unlock()
+				if currentLis != wrapper {
+					return
+				}
+				listener(acbw.lastState)
+			})
+			return
+		}
+		healthOpts := internal.HealthCheckOptions{
+			HealthCheckFunc:   acbw.ccb.cc.dopts.healthCheckFunc,
+			HealthServiceName: svcName,
+		}
+		updateFunc := func(state balancer.SubConnState) {
+			acbw.ccb.serializer.TrySchedule(func(ctx context.Context) {
+				if ctx.Err() != nil || acbw.ccb.balancer == nil {
+					return
+				}
+				if acbw.lastState.ConnectivityState != connectivity.Ready {
+					return
+				}
+				acbw.healthMu.Lock()
+				currentLis := acbw.healthListener
+				acbw.healthMu.Unlock()
+				if currentLis != wrapper {
+					return
+				}
+				listener(state)
+			})
+		}
+		internal.RegisterClientHealthCheckListener.(func(balancer.SubConn, internal.HealthCheckOptions, func(balancer.SubConnState)) func())(acbw, healthOpts, updateFunc)
+	})
 }
 
 func (ccb *ccBalancerWrapper) UpdateState(s balancer.State) {
@@ -343,9 +348,7 @@ func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolve
 		// opts.StateListener is set, so this cannot ever be nil.
 		// TODO: delete this comment when UpdateSubConnState is removed.
 		scs := balancer.SubConnState{ConnectivityState: s, ConnectionError: err}
-		acbw.healthMu.Lock()
 		acbw.lastState = scs
-		acbw.healthMu.Unlock()
 		if s == connectivity.Ready {
 			setConnectedAddress(&scs, curAddr)
 		}

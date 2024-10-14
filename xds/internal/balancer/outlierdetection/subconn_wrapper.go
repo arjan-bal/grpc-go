@@ -19,7 +19,6 @@ package outlierdetection
 
 import (
 	"fmt"
-	"sync"
 	"unsafe"
 
 	"google.golang.org/grpc/balancer"
@@ -45,7 +44,6 @@ type subConnWrapper struct {
 	latestHealthState     *balancer.SubConnState
 	healthListenerEnabled bool
 	ejected               bool
-	healthMu              sync.Mutex
 	healthListener        func(balancer.SubConnState)
 
 	scUpdateCh *buffer.Unbounded
@@ -82,13 +80,8 @@ func (scw *subConnWrapper) String() string {
 
 func (scw *subConnWrapper) RegisterHealthListener(lis func(balancer.SubConnState)) {
 	fmt.Println("Wrappers register func called.")
-
-	scw.healthMu.Lock()
-	defer scw.healthMu.Unlock()
-	scw.healthListener = lis
-	// TODO: PF may need to be given the current health update if it didn't
-	// register the listener synchronously while handing the raw state update
-	// for ready. That may cause issues because there may be queued health
-	// updates in the buffer already.
-	// It may be possible to do it using separate go routine and healthMu.
+	scw.scUpdateCh.Put(&scHealthUpdate{
+		listener: lis,
+		scw:      scw,
+	})
 }

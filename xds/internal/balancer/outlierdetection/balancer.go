@@ -144,8 +144,9 @@ type scUpdate struct {
 
 // scHealthUpdate wraps a subConn health update to be sent to the child balancer.
 type scHealthUpdate struct {
-	scw   *subConnWrapper
-	state balancer.SubConnState
+	scw      *subConnWrapper
+	state    *balancer.SubConnState
+	listener func(balancer.SubConnState)
 }
 
 type ejectionUpdate struct {
@@ -363,20 +364,6 @@ func (b *outlierDetectionBalancer) updateSubConnState(sc balancer.SubConn, state
 	if state.ConnectivityState == connectivity.Shutdown {
 		delete(b.scWrappers, scw.SubConn)
 	}
-	if scw.healthListenerEnabled {
-		scw.healthMu.Lock()
-		defer scw.healthMu.Unlock()
-		scw.latestHealthState = nil
-		scw.healthListener = nil
-		if state.ConnectivityState == connectivity.Ready {
-			scw.SubConn.RegisterHealthListener(func(scs balancer.SubConnState) {
-				b.scUpdateCh.Put(&scHealthUpdate{
-					state: scs,
-					scw:   scw,
-				})
-			})
-		}
-	}
 	b.scUpdateCh.Put(&scUpdate{
 		scw:   scw,
 		state: state,
@@ -501,7 +488,6 @@ func (b *outlierDetectionBalancer) NewSubConn(addrs []resolver.Address, opts bal
 		bal:                   b,
 		healthListenerEnabled: genericHealthProducerEnabled,
 		listener:              opts.StateListener,
-		healthMu:              sync.Mutex{},
 	}
 
 	var sc balancer.SubConn
@@ -631,6 +617,7 @@ func (b *outlierDetectionBalancer) handleSubConnUpdate(u *scUpdate) {
 	if scw.listener == nil {
 		return
 	}
+	scw.healthListener = nil
 	if !scw.ejected || scw.healthListenerEnabled {
 		b.childMu.Lock()
 		scw.listener(u.state)
@@ -642,17 +629,26 @@ func (b *outlierDetectionBalancer) handleSubConnUpdate(u *scUpdate) {
 // if the SubConn is not ejected.
 func (b *outlierDetectionBalancer) handleSubConnHealthUpdate(u *scHealthUpdate) {
 	scw := u.scw
-	scw.latestHealthState = &u.state
+	scw.latestHealthState = u.state
+	if u.listener != nil {
+		scw.healthListener = u.listener
+		// The SubConn may have already changed the state while registering the
+		// listener, this is eventually consistent.
+		scw.SubConn.RegisterHealthListener(func(scs balancer.SubConnState) {
+			scw.scUpdateCh.Put(&scHealthUpdate{
+				state: &scs,
+				scw:   scw,
+			})
+		})
+	}
 
 	if scw.ejected {
 		return
 	}
-	scw.healthMu.Lock()
 	listener := scw.healthListener
-	scw.healthMu.Unlock()
-	if listener != nil {
+	if listener != nil && u.state != nil {
 		b.childMu.Lock()
-		listener(u.state)
+		listener(*u.state)
 		b.childMu.Unlock()
 	}
 }
@@ -688,7 +684,6 @@ func (b *outlierDetectionBalancer) handleEjectedUpdate(u *ejectionUpdate) {
 		return
 	}
 	if scw.listener != nil {
-		fmt.Println("In ejected", stateToUpdate)
 		b.childMu.Lock()
 		scw.listener(*stateToUpdate)
 		b.childMu.Unlock()
