@@ -188,6 +188,8 @@ func (ccb *ccBalancerWrapper) NewSubConn(addrs []resolver.Address, opts balancer
 		ccb:           ccb,
 		ac:            ac,
 		producers:     make(map[balancer.ProducerBuilder]*refCountedProducer),
+		producersMu:   sync.Mutex{},
+		healthMu:      sync.Mutex{},
 		stateListener: opts.StateListener,
 	}
 	ac.acbw = acbw
@@ -207,9 +209,19 @@ func (ccb *ccBalancerWrapper) UpdateAddresses(sc balancer.SubConn, addrs []resol
 	acbw.UpdateAddresses(addrs)
 }
 
-func (acbw *acBalancerWrapper) RegisterHealthListener(listener func(balancer.SubConnState)) func() {
-	cfg := acbw.ccb.cc.healthCheckConfig()
+type listenerWrapper struct {
+	onUpdate func(balancer.SubConnState)
+}
 
+func (acbw *acBalancerWrapper) RegisterHealthListener(listener func(balancer.SubConnState)) {
+	wrapper := &listenerWrapper{onUpdate: listener}
+	acbw.healthMu.Lock()
+	defer acbw.healthMu.Unlock()
+	acbw.healthListener = wrapper
+	if acbw.lastState.ConnectivityState != connectivity.Ready {
+		return
+	}
+	cfg := acbw.ccb.cc.healthCheckConfig()
 	svcName := ""
 	healthCheckEnabled := !acbw.ccb.cc.dopts.disableHealthCheck
 	if cfg == nil {
@@ -217,31 +229,42 @@ func (acbw *acBalancerWrapper) RegisterHealthListener(listener func(balancer.Sub
 	} else {
 		svcName = cfg.ServiceName
 	}
-	healthOpts := internal.HealthCheckOptions{
-		HealthCheckFunc:   acbw.ccb.cc.dopts.healthCheckFunc,
-		HealthServiceName: svcName,
-	}
-	if !healthCheckEnabled {
-		acbw.healthListener = listener
+	if !healthCheckEnabled || internal.RegisterClientHealthCheckListener == nil {
 		acbw.ccb.serializer.TrySchedule(func(ctx context.Context) {
 			if ctx.Err() != nil || acbw.ccb.balancer == nil {
 				return
 			}
+			acbw.healthMu.Lock()
+			defer acbw.healthMu.Unlock()
+
+			if acbw.healthListener != wrapper {
+				return
+			}
 			listener(acbw.lastState)
 		})
-		return func() {}
+		return
 	}
-	// TODO: Handle this case by logging error and sending READY.
-	if internal.RegisterClientHealthCheckListener == nil {
-		return func() {}
+	healthOpts := internal.HealthCheckOptions{
+		HealthCheckFunc:   acbw.ccb.cc.dopts.healthCheckFunc,
+		HealthServiceName: svcName,
 	}
-	closeFn := internal.RegisterClientHealthCheckListener.(func(balancer.SubConn, internal.HealthCheckOptions, func(balancer.SubConnState)) func())(acbw, healthOpts, listener)
-	if acbw.healthCheckCloseFn != nil {
-		acbw.healthCheckCloseFn()
+	updateFunc := func(state balancer.SubConnState) {
+		acbw.ccb.serializer.TrySchedule(func(ctx context.Context) {
+			if ctx.Err() != nil || acbw.ccb.balancer == nil {
+				return
+			}
+			if acbw.lastState.ConnectivityState != connectivity.Ready {
+				return
+			}
+			acbw.healthMu.Lock()
+			defer acbw.healthMu.Unlock()
+			if acbw.healthListener != wrapper {
+				return
+			}
+			listener(state)
+		})
 	}
-	acbw.healthCheckCloseFn = closeFn
-
-	return func() {}
+	internal.RegisterClientHealthCheckListener.(func(balancer.SubConn, internal.HealthCheckOptions, func(balancer.SubConnState)) func())(acbw, healthOpts, updateFunc)
 }
 
 func (ccb *ccBalancerWrapper) UpdateState(s balancer.State) {
@@ -296,10 +319,11 @@ type acBalancerWrapper struct {
 	stateListener func(balancer.SubConnState)
 	lastState     balancer.SubConnState
 
-	producersMu        sync.Mutex
-	producers          map[balancer.ProducerBuilder]*refCountedProducer
-	healthCheckCloseFn func()
-	healthListener     func(balancer.SubConnState)
+	producersMu sync.Mutex
+	producers   map[balancer.ProducerBuilder]*refCountedProducer
+
+	healthListener *listenerWrapper
+	healthMu       sync.Mutex
 }
 
 // updateState is invoked by grpc to push a subConn state update to the
@@ -311,19 +335,21 @@ func (acbw *acBalancerWrapper) updateState(s connectivity.State, curAddr resolve
 		}
 		// Invalidate all producers on any state change.
 		acbw.closeProducers()
+		acbw.healthMu.Lock()
+		acbw.healthListener = nil
+		acbw.healthMu.Unlock()
 
 		// Even though it is optional for balancers, gracefulswitch ensures
 		// opts.StateListener is set, so this cannot ever be nil.
 		// TODO: delete this comment when UpdateSubConnState is removed.
 		scs := balancer.SubConnState{ConnectivityState: s, ConnectionError: err}
+		acbw.healthMu.Lock()
 		acbw.lastState = scs
+		acbw.healthMu.Unlock()
 		if s == connectivity.Ready {
 			setConnectedAddress(&scs, curAddr)
 		}
 		acbw.stateListener(scs)
-		if acbw.healthListener != nil {
-			acbw.healthListener(scs)
-		}
 	})
 }
 
@@ -342,10 +368,6 @@ func (acbw *acBalancerWrapper) Connect() {
 func (acbw *acBalancerWrapper) Shutdown() {
 	acbw.closeProducers()
 	acbw.ccb.cc.removeAddrConn(acbw.ac, errConnDrain)
-	if acbw.healthCheckCloseFn != nil {
-		acbw.healthCheckCloseFn()
-		acbw.healthCheckCloseFn = nil
-	}
 }
 
 // NewStream begins a streaming RPC on the addrConn.  If the addrConn is not

@@ -33,8 +33,10 @@ var (
 	WithHealthCheckFunc any // func (HealthChecker) DialOption
 	// HealthCheckFunc is used to provide client-side LB channel health checking
 	HealthCheckFunc                   HealthChecker
-	RegisterClientHealthCheckListener any // func(sc balancer.SubConn, opts balancer.HealthCheckOptions, listener func(balancer.SubConnState)) func()
-	UpdateHealthCheckOpts             any // func(balancer.SubConn, balancer.HealthCheckOptions) func()
+	RegisterClientHealthCheckListener any // func(balancer.SubConn, balancer.HealthCheckOptions, func(balancer.SubConnState))
+	// IsManagedByPickfirst returns whether an address belongs to a SubConn
+	// managed by the pickfirst LB policy.
+	IsManagedByPickfirst any // func(resolver.Address) bool
 	// BalancerUnregister is exported by package balancer to unregister a balancer.
 	BalancerUnregister func(name string)
 	// KeepaliveMinPingTime is the minimum ping interval.  This must be 10s by

@@ -19,6 +19,7 @@ package outlierdetection
 
 import (
 	"fmt"
+	"sync"
 	"unsafe"
 
 	"google.golang.org/grpc/balancer"
@@ -40,8 +41,12 @@ type subConnWrapper struct {
 	// run(), and child will always have the correctly updated SubConnState.
 	// latestState is the latest state update from the underlying SubConn. This
 	// is used whenever a SubConn gets unejected.
-	latestState balancer.SubConnState
-	ejected     bool
+	latestState           balancer.SubConnState
+	latestHealthState     *balancer.SubConnState
+	healthListenerEnabled bool
+	ejected               bool
+	healthMu              sync.Mutex
+	healthListener        func(balancer.SubConnState)
 
 	scUpdateCh *buffer.Unbounded
 
@@ -75,13 +80,15 @@ func (scw *subConnWrapper) String() string {
 	return fmt.Sprintf("%+v", scw.addresses)
 }
 
-func (scw *subConnWrapper) RegisterHealthListener(lis func(balancer.SubConnState)) func() {
+func (scw *subConnWrapper) RegisterHealthListener(lis func(balancer.SubConnState)) {
 	fmt.Println("Wrappers register func called.")
-	sc := scw.SubConn
-	closeFn := sc.RegisterHealthListener(func(scs balancer.SubConnState) {
-		scw.bal.logger.Infof("Got health update for sc %v: %v", sc, scs)
-		scw.bal.updateSubConnState(sc, scs)
-	})
-	scw.listener = lis
-	return closeFn
+
+	scw.healthMu.Lock()
+	defer scw.healthMu.Unlock()
+	scw.healthListener = lis
+	// TODO: PF may need to be given the current health update if it didn't
+	// register the listener synchronously while handing the raw state update
+	// for ready. That may cause issues because there may be queued health
+	// updates in the buffer already.
+	// It may be possible to do it using separate go routine and healthMu.
 }

@@ -35,6 +35,7 @@ import (
 	"google.golang.org/grpc/balancer/pickfirst/internal"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/grpclog"
+	grpcinternal "google.golang.org/grpc/internal"
 	"google.golang.org/grpc/internal/envconfig"
 	internalgrpclog "google.golang.org/grpc/internal/grpclog"
 	"google.golang.org/grpc/internal/pretty"
@@ -48,6 +49,9 @@ func init() {
 		Name = "pick_first"
 	}
 	balancer.Register(pickfirstBuilder{})
+	grpcinternal.IsManagedByPickfirst = func(addr resolver.Address) bool {
+		return addr.Attributes.Value(outlierDetectionDisabledKey) == outlierDetectionDisabledValue
+	}
 }
 
 var (
@@ -63,12 +67,12 @@ var (
 	outlierDetectionDisabledKey   = "outlier_detection_disabled"
 	outlierDetectionDisabledValue = &struct{}{}
 
-	// EnableHealthListenerKey is the resolver state attributes key for making
+	// enableHealthListenerKey is the resolver state attributes key for making
 	// pickfirst listen to health updates when its under a petiole policy.
-	EnableHealthListenerKey = "generic_health_listener_enabled"
-	// EnableHealthListenerValue is the resolver state attributes value for making
+	enableHealthListenerKey = "generic_health_listener_enabled"
+	// enableHealthListenerValue is the resolver state attributes value for making
 	// pickfirst listen to health updates when its under a petiole policy.
-	EnableHealthListenerValue = &struct{}{}
+	enableHealthListenerValue = &struct{}{}
 )
 
 // TODO: change to pick-first when this becomes the default pick_first policy.
@@ -88,6 +92,13 @@ func (pickfirstBuilder) Build(cc balancer.ClientConn, _ balancer.BuildOptions) b
 	}
 	b.logger = internalgrpclog.NewPrefixLogger(logger, fmt.Sprintf(logPrefix, b))
 	return b
+}
+
+// EnableHealthListener updates the state to configure pickfirst for using a
+// generic health listener.
+func EnableHealthListener(state balancer.ClientConnState) balancer.ClientConnState {
+	state.ResolverState.Attributes = state.ResolverState.Attributes.WithValue(enableHealthListenerKey, enableHealthListenerValue)
+	return state
 }
 
 func (b pickfirstBuilder) Name() string {
@@ -124,7 +135,6 @@ type scData struct {
 	rawConnectivityState connectivity.State
 	healthState          balancer.SubConnState
 	lastErr              error
-	closeFn              func()
 }
 
 func (b *pickfirstBalancer) newSCData(addr resolver.Address) (*scData, error) {
@@ -144,20 +154,11 @@ func (b *pickfirstBalancer) newSCData(addr resolver.Address) (*scData, error) {
 		return nil, err
 	}
 	sd.subConn = sc
-	if b.healthCheckingEnabled {
-		fmt.Println("Registering a health listener in PF")
-		sd.closeFn = sd.subConn.RegisterHealthListener(func(state balancer.SubConnState) {
-			b.updateSubConnHealthState(sd, state)
-		})
-	}
 	return sd, nil
 }
 
 func (sd *scData) cleanup() {
 	sd.subConn.Shutdown()
-	if sd.closeFn != nil {
-		sd.closeFn()
-	}
 }
 
 type pickfirstBalancer struct {
@@ -225,7 +226,7 @@ func (b *pickfirstBalancer) UpdateClientConnState(state balancer.ClientConnState
 		b.resolverErrorLocked(errors.New("produced zero addresses"))
 		return balancer.ErrBadResolverState
 	}
-	b.healthCheckingEnabled = state.ResolverState.Attributes.Value(EnableHealthListenerKey) == EnableHealthListenerValue
+	b.healthCheckingEnabled = state.ResolverState.Attributes.Value(enableHealthListenerKey) == enableHealthListenerValue
 	cfg, ok := state.BalancerConfig.(pfConfig)
 	if state.BalancerConfig != nil && !ok {
 		return fmt.Errorf("pickfirst: received illegal BalancerConfig (type %T): %v: %w", state.BalancerConfig, state.BalancerConfig, balancer.ErrBadResolverState)
@@ -477,6 +478,11 @@ func (b *pickfirstBalancer) updateSubConnState(sd *scData, newState balancer.Sub
 			b.updateBalancerState(balancer.State{
 				ConnectivityState: connectivity.Ready,
 				Picker:            &picker{result: balancer.PickResult{SubConn: sd.subConn}},
+			})
+		} else {
+			fmt.Println("Health check is enabled, registering health listener.")
+			sd.subConn.RegisterHealthListener(func(scs balancer.SubConnState) {
+				b.updateSubConnHealthState(sd, scs)
 			})
 		}
 		return

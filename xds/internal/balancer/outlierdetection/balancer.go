@@ -33,8 +33,8 @@ import (
 	"unsafe"
 
 	"google.golang.org/grpc/balancer"
-	"google.golang.org/grpc/balancer/pickfirstleaf"
 	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/internal"
 	"google.golang.org/grpc/internal/balancer/gracefulswitch"
 	"google.golang.org/grpc/internal/buffer"
 	"google.golang.org/grpc/internal/channelz"
@@ -138,6 +138,12 @@ func (bb) Name() string {
 
 // scUpdate wraps a subConn update to be sent to the child balancer.
 type scUpdate struct {
+	scw   *subConnWrapper
+	state balancer.SubConnState
+}
+
+// scHealthUpdate wraps a subConn health update to be sent to the child balancer.
+type scHealthUpdate struct {
 	scw   *subConnWrapper
 	state balancer.SubConnState
 }
@@ -344,6 +350,7 @@ func (b *outlierDetectionBalancer) ResolverError(err error) {
 }
 
 func (b *outlierDetectionBalancer) updateSubConnState(sc balancer.SubConn, state balancer.SubConnState) {
+	fmt.Println("Got subconn state update", state)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	scw, ok := b.scWrappers[sc]
@@ -355,6 +362,20 @@ func (b *outlierDetectionBalancer) updateSubConnState(sc balancer.SubConn, state
 	}
 	if state.ConnectivityState == connectivity.Shutdown {
 		delete(b.scWrappers, scw.SubConn)
+	}
+	if scw.healthListenerEnabled {
+		scw.healthMu.Lock()
+		defer scw.healthMu.Unlock()
+		scw.latestHealthState = nil
+		scw.healthListener = nil
+		if state.ConnectivityState == connectivity.Ready {
+			scw.SubConn.RegisterHealthListener(func(scs balancer.SubConnState) {
+				b.scUpdateCh.Put(&scHealthUpdate{
+					state: scs,
+					scw:   scw,
+				})
+			})
+		}
 	}
 	b.scUpdateCh.Put(&scUpdate{
 		scw:   scw,
@@ -467,46 +488,29 @@ func (b *outlierDetectionBalancer) UpdateState(s balancer.State) {
 	b.pickerUpdateCh.Put(s)
 }
 
-type healthListener struct {
-	b  *outlierDetectionBalancer
-	sc balancer.SubConn
-}
-
-func (hl *healthListener) OnStateChange(state balancer.SubConnState) {
-	hl.b.updateSubConnState(hl.sc, state)
-}
-
 func (b *outlierDetectionBalancer) NewSubConn(addrs []resolver.Address, opts balancer.NewSubConnOptions) (balancer.SubConn, error) {
 	// Determine if the generic health producer is being used.
 	genericHealthProducerEnabled := false
-	if len(addrs) == 1 && addrs[0].Attributes.Value(pickfirstleaf.OutlierDetectionDisabledKey) == pickfirstleaf.OutlierDetectionDisabledValue {
+	if len(addrs) == 1 && internal.IsManagedByPickfirst.(func(resolver.Address) bool)(addrs[0]) {
 		genericHealthProducerEnabled = true
 	}
 
-	var sc balancer.SubConn
-	oldListener := opts.StateListener
-	if !genericHealthProducerEnabled {
-		opts.StateListener = func(state balancer.SubConnState) { b.updateSubConnState(sc, state) }
-	} else {
-		opts.StateListener = func(scs balancer.SubConnState) {
-			b.childMu.Lock()
-			oldListener(scs)
-			b.childMu.Unlock()
-		}
+	scw := &subConnWrapper{
+		addresses:             addrs,
+		scUpdateCh:            b.scUpdateCh,
+		bal:                   b,
+		healthListenerEnabled: genericHealthProducerEnabled,
+		listener:              opts.StateListener,
+		healthMu:              sync.Mutex{},
 	}
+
+	var sc balancer.SubConn
+	opts.StateListener = func(state balancer.SubConnState) { b.updateSubConnState(sc, state) }
 	sc, err := b.cc.NewSubConn(addrs, opts)
 	if err != nil {
 		return nil, err
 	}
-	scw := &subConnWrapper{
-		SubConn:    sc,
-		addresses:  addrs,
-		scUpdateCh: b.scUpdateCh,
-		bal:        b,
-	}
-	if !genericHealthProducerEnabled {
-		scw.listener = oldListener
-	}
+	scw.SubConn = sc
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.scWrappers[sc] = scw
@@ -624,12 +628,32 @@ func (b *outlierDetectionBalancer) Target() string {
 func (b *outlierDetectionBalancer) handleSubConnUpdate(u *scUpdate) {
 	scw := u.scw
 	scw.latestState = u.state
-	if !scw.ejected {
-		if scw.listener != nil {
-			b.childMu.Lock()
-			scw.listener(u.state)
-			b.childMu.Unlock()
-		}
+	if scw.listener == nil {
+		return
+	}
+	if !scw.ejected || scw.healthListenerEnabled {
+		b.childMu.Lock()
+		scw.listener(u.state)
+		b.childMu.Unlock()
+	}
+}
+
+// handleSubConnHealthUpdate stores the recent state and forward the update
+// if the SubConn is not ejected.
+func (b *outlierDetectionBalancer) handleSubConnHealthUpdate(u *scHealthUpdate) {
+	scw := u.scw
+	scw.latestHealthState = &u.state
+
+	if scw.ejected {
+		return
+	}
+	scw.healthMu.Lock()
+	listener := scw.healthListener
+	scw.healthMu.Unlock()
+	if listener != nil {
+		b.childMu.Lock()
+		listener(u.state)
+		b.childMu.Unlock()
 	}
 }
 
@@ -640,16 +664,33 @@ func (b *outlierDetectionBalancer) handleEjectedUpdate(u *ejectionUpdate) {
 	scw.ejected = u.isEjected
 	// If scw.latestState has never been written to will default to connectivity
 	// IDLE, which is fine.
-	stateToUpdate := scw.latestState
+	stateToUpdate := &scw.latestState
+	if scw.healthListenerEnabled {
+		stateToUpdate = scw.latestHealthState
+	}
 	if u.isEjected {
-		stateToUpdate = balancer.SubConnState{
+		stateToUpdate = &balancer.SubConnState{
 			ConnectivityState: connectivity.TransientFailure,
 		}
+	}
+	if stateToUpdate == nil {
+		return
+	}
+	if scw.healthListenerEnabled {
+		if scw.healthListener == nil {
+			fmt.Println("scw.healthListener is nil")
+			return
+		}
+
+		b.childMu.Lock()
+		scw.healthListener(*stateToUpdate)
+		b.childMu.Unlock()
+		return
 	}
 	if scw.listener != nil {
 		fmt.Println("In ejected", stateToUpdate)
 		b.childMu.Lock()
-		scw.listener(stateToUpdate)
+		scw.listener(*stateToUpdate)
 		b.childMu.Unlock()
 	} else {
 		fmt.Println("scw.listener is nil")
@@ -726,6 +767,8 @@ func (b *outlierDetectionBalancer) run() {
 				b.handleSubConnUpdate(u)
 			case *ejectionUpdate:
 				b.handleEjectedUpdate(u)
+			case *scHealthUpdate:
+				b.handleSubConnHealthUpdate(u)
 			}
 		case update, ok := <-b.pickerUpdateCh.Get():
 			if !ok {

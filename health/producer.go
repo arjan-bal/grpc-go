@@ -47,11 +47,10 @@ type healthServiceProducer struct {
 	opts     internal.HealthCheckOptions
 }
 
-// RegisterClientSideHealthCheckListenerFunc returns a function to register a
-// listener for health updates via the health checking service.
-// At most one listener must be registered per subchannel.
-func RegisterClientSideHealthCheckListener(sc balancer.SubConn, opts internal.HealthCheckOptions, listener func(balancer.SubConnState)) func() {
-	pr, closeFn := sc.GetOrBuildProducer(producerBuilderSingleton)
+// RegisterClientSideHealthCheckListener accepts a listener to provide server
+// health state via the health service.
+func RegisterClientSideHealthCheckListener(sc balancer.SubConn, opts internal.HealthCheckOptions, listener func(balancer.SubConnState)) {
+	pr, _ := sc.GetOrBuildProducer(producerBuilderSingleton)
 	p := pr.(*healthServiceProducer)
 	if p.listener != nil {
 		panic("Attempting to start health check multiple times on the same subchannel")
@@ -59,7 +58,7 @@ func RegisterClientSideHealthCheckListener(sc balancer.SubConn, opts internal.He
 	p.listener = listener
 	p.opts = opts
 	go p.startHealthCheck()
-	return closeFn
+	return
 }
 
 func (p *healthServiceProducer) startHealthCheck() {

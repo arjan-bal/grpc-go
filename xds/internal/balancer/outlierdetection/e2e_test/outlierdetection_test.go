@@ -29,7 +29,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/balancer"
-	"google.golang.org/grpc/balancer/pickfirstleaf"
+	"google.golang.org/grpc/balancer/pickfirst/pickfirstleaf"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/internal"
@@ -462,8 +462,7 @@ func (bb *healthCheckingPetiolePolicyBuilder) Name() string {
 }
 
 func (b *healthCheckingPetiolePolicy) UpdateClientConnState(state balancer.ClientConnState) error {
-	state.ResolverState.Attributes = state.ResolverState.Attributes.WithValue(pickfirstleaf.EnableHealthListenerKey, pickfirstleaf.EnableHealthListenerValue)
-	return b.Balancer.UpdateClientConnState(state)
+	return b.Balancer.UpdateClientConnState(pickfirstleaf.EnableHealthListener(state))
 }
 
 type healthCheckingPetiolePolicy struct {

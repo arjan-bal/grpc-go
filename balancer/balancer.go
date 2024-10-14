@@ -158,8 +158,8 @@ type SubConn interface {
 	// RegisterHealthListener sets the health listener to which health updates are
 	// are delivered. A listener should be registered every time the SubConn's
 	// raw ConnectivityState changes. When the ConnectivityState is not Ready, no
-	// updates will be sent.
-	RegisterHealthListener(func(SubConnState)) func()
+	// updates will be sent on the listener.
+	RegisterHealthListener(func(SubConnState))
 }
 
 // NewSubConnOptions contains options to create new SubConn.
