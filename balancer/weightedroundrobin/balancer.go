@@ -83,8 +83,13 @@ var (
 	})
 )
 
-// endpointSharding which specifies pick first children.
-var endpointShardingLBConfig serviceconfig.LoadBalancingConfig
+// endpointWeightKey is the address attribute key.
+type endpointWeightKey struct{}
+
+var (
+	// endpointSharding which specifies pick first children.
+	endpointShardingLBConfig serviceconfig.LoadBalancingConfig
+)
 
 func init() {
 	balancer.Register(bb{})
@@ -102,7 +107,6 @@ func (bb) Build(cc balancer.ClientConn, bOpts balancer.BuildOptions) balancer.Ba
 		ClientConn:       cc,
 		target:           bOpts.Target.String(),
 		metricsRecorder:  bOpts.MetricsRecorder,
-		addressWeights:   resolver.NewAddressMap(),
 		endpointToWeight: resolver.NewEndpointMap(),
 		scToWeight:       make(map[balancer.SubConn]*endpointWeight),
 	}
@@ -152,14 +156,11 @@ func (bb) Name() string {
 // starting and clearing any endpoint weights needed.
 //
 // Caller must hold b.mu.
-func (b *wrrBalancer) updateEndpointsLocked(endpoints []resolver.Endpoint) {
+func (b *wrrBalancer) updateEndpointsLocked(endpoints []resolver.Endpoint) []resolver.Endpoint {
 	endpointSet := resolver.NewEndpointMap()
-	addressSet := resolver.NewAddressMap()
-	for _, endpoint := range endpoints {
+
+	for i, endpoint := range endpoints {
 		endpointSet.Set(endpoint, nil)
-		for _, addr := range endpoint.Addresses {
-			addressSet.Set(addr, nil)
-		}
 		var ew *endpointWeight
 		if ewi, ok := b.endpointToWeight.Get(endpoint); ok {
 			ew = ewi.(*endpointWeight)
@@ -174,11 +175,14 @@ func (b *wrrBalancer) updateEndpointsLocked(endpoints []resolver.Endpoint) {
 				target:          b.target,
 				locality:        b.locality,
 			}
-			for _, addr := range endpoint.Addresses {
-				b.addressWeights.Set(addr, ew)
-			}
 			b.endpointToWeight.Set(endpoint, ew)
 		}
+		// Store the endpoint weights in the address attributes so that they
+		// can be retrieved during SubConn creation.
+		for j, addr := range endpoint.Addresses {
+			endpoints[i].Addresses[j].Attributes = addr.Attributes.WithValue(endpointWeightKey{}, ew)
+		}
+
 		ew.updateConfig(b.cfg)
 	}
 
@@ -188,14 +192,10 @@ func (b *wrrBalancer) updateEndpointsLocked(endpoints []resolver.Endpoint) {
 			continue
 		}
 		b.endpointToWeight.Delete(endpoint)
-		for _, addr := range endpoint.Addresses {
-			if _, ok := addressSet.Get(addr); !ok { // old endpoints to be deleted can share addresses with new endpoints, so only delete if necessary
-				b.addressWeights.Delete(addr)
-			}
-		}
 		// SubConn map will get handled in updateSubConnState
 		// when receives SHUTDOWN signal.
 	}
+	return endpoints
 }
 
 // wrrBalancer implements the weighted round robin LB policy.
@@ -212,13 +212,14 @@ type wrrBalancer struct {
 	cfg              *lbConfig // active config
 	locality         string
 	stopPicker       *grpcsync.Event
-	addressWeights   *resolver.AddressMap  // addr -> endpointWeight
 	endpointToWeight *resolver.EndpointMap // endpoint -> endpointWeight
 	scToWeight       map[balancer.SubConn]*endpointWeight
 }
 
 func (b *wrrBalancer) UpdateClientConnState(ccs balancer.ClientConnState) error {
-	b.logger.Infof("UpdateCCS: %v", ccs)
+	if b.logger.V(2) {
+		b.logger.Infof("UpdateCCS: %v", ccs)
+	}
 	cfg, ok := ccs.BalancerConfig.(*lbConfig)
 	if !ok {
 		return fmt.Errorf("wrr: received nil or illegal BalancerConfig (type %T): %v", ccs.BalancerConfig, ccs.BalancerConfig)
@@ -229,7 +230,7 @@ func (b *wrrBalancer) UpdateClientConnState(ccs balancer.ClientConnState) error 
 	b.mu.Lock()
 	b.cfg = cfg
 	b.locality = weightedtarget.LocalityFromResolverState(ccs.ResolverState)
-	b.updateEndpointsLocked(ccs.ResolverState.Endpoints)
+	ccs.ResolverState.Endpoints = b.updateEndpointsLocked(ccs.ResolverState.Endpoints)
 	b.mu.Unlock()
 
 	// This causes child to update picker inline and will thus cause inline
@@ -314,17 +315,12 @@ func (b *wrrBalancer) NewSubConn(addrs []resolver.Address, opts balancer.NewSubC
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	ewi, ok := b.addressWeights.Get(addr)
-	if !ok {
-		// SubConn state updates can come in for a no longer relevant endpoint
-		// weight (from the old system after a new config update is applied).
-		return nil, fmt.Errorf("balancer is being closed; no new SubConns allowed")
-	}
+	ewi := addr.Attributes.Value(endpointWeightKey{}).(*endpointWeight)
 	sc, err := b.ClientConn.NewSubConn([]resolver.Address{addr}, opts)
 	if err != nil {
 		return nil, err
 	}
-	b.scToWeight[sc] = ewi.(*endpointWeight)
+	b.scToWeight[sc] = ewi
 	return sc, nil
 }
 
