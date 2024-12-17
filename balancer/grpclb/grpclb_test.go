@@ -1107,16 +1107,16 @@ func (s) TestGRPCLB_PickFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create a client for the backend: %v", err)
 	}
-	cc.Connect()
 	defer cc.Close()
 
 	// Push a service config with grpclb as the load balancing policy and
 	// configure pick_first as its child policy.
-	rs := resolver.State{ServiceConfig: r.CC.ParseServiceConfig(`{"loadBalancingConfig":[{"grpclb":{"childPolicy":[{"pick_first":{}}]}}]}`)}
+	svcCfg := `{"loadBalancingConfig":[{"grpclb":{"childPolicy":[{"pick_first":{}}]}}]}`
+	rs := resolver.State{ServiceConfig: internal.ParseServiceConfig.(func(string) *serviceconfig.ParseResult)(svcCfg)}
 
 	// Push a resolver update with the remote balancer address specified via
 	// attributes.
-	r.UpdateState(grpclbstate.Set(rs, &grpclbstate.State{BalancerAddresses: []resolver.Address{{Addr: tss.lbAddr, ServerName: lbServerName}}}))
+	r.InitialState(grpclbstate.Set(rs, &grpclbstate.State{BalancerAddresses: []resolver.Address{{Addr: tss.lbAddr, ServerName: lbServerName}}}))
 
 	// Push all three backend addresses to the remote balancer, and verify that
 	// RPCs are routed to the first backend.
@@ -1247,7 +1247,6 @@ func testGRPCLBEmptyServerList(t *testing.T, svcfg string) {
 	if err != nil {
 		t.Fatalf("Failed to create a client for the backend %v", err)
 	}
-	cc.Connect()
 	defer cc.Close()
 	testC := testgrpc.NewTestServiceClient(cc)
 
@@ -1261,8 +1260,8 @@ func testGRPCLBEmptyServerList(t *testing.T, svcfg string) {
 			},
 		},
 	}
-	rs := grpclbstate.Set(resolver.State{ServiceConfig: r.CC.ParseServiceConfig(svcfg)}, s)
-	r.UpdateState(rs)
+	rs := grpclbstate.Set(resolver.State{ServiceConfig: internal.ParseServiceConfig.(func(string) *serviceconfig.ParseResult)(svcfg)}, s)
+	r.InitialState(rs)
 	t.Log("Perform an initial RPC and expect it to succeed...")
 	if _, err := testC.EmptyCall(ctx, &testpb.Empty{}, grpc.WaitForReady(true)); err != nil {
 		t.Fatalf("Initial _.EmptyCall(_, _) = _, %v, want _, <nil>", err)
@@ -1429,11 +1428,10 @@ func runAndCheckStats(t *testing.T, drop bool, statsChan chan *lbpb.ClientStats,
 	if err != nil {
 		t.Fatalf("Failed to create a client for the backend %v", err)
 	}
-	cc.Connect()
 	defer cc.Close()
 
-	rstate := resolver.State{ServiceConfig: r.CC.ParseServiceConfig(grpclbConfig)}
-	r.UpdateState(grpclbstate.Set(rstate, &grpclbstate.State{BalancerAddresses: []resolver.Address{{
+	rstate := resolver.State{ServiceConfig: internal.ParseServiceConfig.(func(string) *serviceconfig.ParseResult)(grpclbConfig)}
+	r.InitialState(grpclbstate.Set(rstate, &grpclbstate.State{BalancerAddresses: []resolver.Address{{
 		Addr:       tss.lbAddr,
 		ServerName: lbServerName,
 	}}}))
@@ -1621,7 +1619,8 @@ func (s) TestGRPCLBStatsStreamingFailedToSend(t *testing.T) {
 func (s) TestGRPCLBStatsQuashEmpty(t *testing.T) {
 	ch := make(chan *lbpb.ClientStats)
 	defer close(ch)
-	if err := runAndCheckStats(t, false, ch, func(*grpc.ClientConn) {
+	if err := runAndCheckStats(t, false, ch, func(cc *grpc.ClientConn) {
+		cc.Connect()
 		// Perform no RPCs; wait for load reports to start, which should be
 		// zero, then expect no other load report within 5x the update
 		// interval.
