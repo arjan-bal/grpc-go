@@ -30,9 +30,9 @@ import (
 // resolver implementation. This allows the default net.Resolver instance to be
 // overridden from tests.
 type NetResolver interface {
-	LookupHost(ctx context.Context, host string) (addrs []string, err error)
 	LookupSRV(ctx context.Context, service, proto, name string) (cname string, addrs []*net.SRV, err error)
 	LookupTXT(ctx context.Context, name string) (txts []string, err error)
+	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
 var (

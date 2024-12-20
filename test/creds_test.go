@@ -32,6 +32,7 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/internal/resolver/dns"
 	"google.golang.org/grpc/internal/testutils"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/resolver"
@@ -260,21 +261,11 @@ func (s) TestWaitForReadyRPCErrorOnBadCertificates(t *testing.T) {
 	te := newTest(t, env{name: "bad-cred", network: "tcp", security: "empty", balancer: "round_robin"})
 	te.startServer(&testServer{security: te.e.security})
 	defer te.tearDown()
-	// Use a manual resolver since DNS resolution on MAC OS may be slow and
-	// result in test flakiness when the test fails due to DeadlineExceeded
-	// instead of bad credentials.
-	name := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "")
-	rb := manual.NewBuilderWithScheme(name)
-	rb.InitialState(resolver.State{
-		Endpoints: []resolver.Endpoint{
-			{Addresses: []resolver.Address{{Addr: te.srvAddr}}},
-		},
-	})
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(clientAlwaysFailCred{}),
-		grpc.WithResolvers(rb),
 	}
-	cc, err := grpc.NewClient(rb.Scheme()+":///whatever", opts...)
+	dns.EnableSRVLookups = false
+	cc, err := grpc.NewClient(te.srvAddr, opts...)
 	if err != nil {
 		t.Fatalf("NewClient(_) = %v, want %v", err, nil)
 	}

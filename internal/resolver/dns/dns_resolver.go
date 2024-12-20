@@ -250,7 +250,7 @@ func (d *dnsResolver) lookupSRV(ctx context.Context) ([]resolver.Address, error)
 		return nil, err
 	}
 	for _, s := range srvs {
-		lbAddrs, err := d.resolver.LookupHost(ctx, s.Target)
+		lbAddrs, err := d.resolver.LookupIPAddr(ctx, s.Target)
 		if err != nil {
 			err = handleDNSError(err, "A") // may become nil
 			if err == nil {
@@ -261,7 +261,7 @@ func (d *dnsResolver) lookupSRV(ctx context.Context) ([]resolver.Address, error)
 			return nil, err
 		}
 		for _, a := range lbAddrs {
-			ip, err := formatIP(a)
+			ip, err := formatIP(a.String())
 			if err != nil {
 				return nil, fmt.Errorf("dns: error parsing A record IP address %v: %v", a, err)
 			}
@@ -316,14 +316,14 @@ func (d *dnsResolver) lookupTXT(ctx context.Context) *serviceconfig.ParseResult 
 }
 
 func (d *dnsResolver) lookupHost(ctx context.Context) ([]resolver.Address, error) {
-	addrs, err := d.resolver.LookupHost(ctx, d.host)
+	addrs, err := d.resolver.LookupIPAddr(ctx, d.host)
 	if err != nil {
 		err = handleDNSError(err, "A")
 		return nil, err
 	}
 	newAddrs := make([]resolver.Address, 0, len(addrs))
 	for _, a := range addrs {
-		ip, err := formatIP(a)
+		ip, err := formatIP(a.String())
 		if err != nil {
 			return nil, fmt.Errorf("dns: error parsing A record IP address %v: %v", a, err)
 		}
