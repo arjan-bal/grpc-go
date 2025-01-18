@@ -50,8 +50,6 @@ func Test(t *testing.T) {
 	grpctest.RunSubTests(t, s{})
 }
 
-var gracefulSwitchPickFirst = endpointsharding.PickFirstConfig
-
 var logger = grpclog.Component("endpoint-sharding-test")
 
 func init() {
@@ -95,7 +93,7 @@ func (fp *fakePetiole) UpdateClientConnState(state balancer.ClientConnState) err
 	}
 
 	return fp.Balancer.UpdateClientConnState(balancer.ClientConnState{
-		BalancerConfig: gracefulSwitchPickFirst,
+		BalancerConfig: endpointsharding.PickFirstConfig,
 		ResolverState:  state.ResolverState,
 	})
 }

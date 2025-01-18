@@ -60,16 +60,35 @@ func init() {
 // ChildState is the balancer state of a child along with the endpoint which
 // identifies the child balancer.
 type ChildState struct {
-	Endpoint resolver.Endpoint
-	State    balancer.State
+	Endpoint        resolver.Endpoint
+	State           balancer.State
+	balancerWrapper *balancerWrapper
+}
+
+// ExitIdle pings the child balancer to exit idle state. It calls ExitIdle of
+// the child balancer on a separate goroutine, so callers don't need to handle
+// synchronous picker updates.
+func (cs *ChildState) ExitIdle() {
+	cs.balancerWrapper.exitIdle()
 }
 
 // NewBalancer returns a load balancing policy that manages homogeneous child
 // policies each owning a single endpoint.
 func NewBalancer(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
+	return newBlanacer(cc, opts, true)
+}
+
+// NewBalancerWithoutAutoReconnect returns a load balancing policy that manages
+// homogeneous child policies each owning a single endpoint.
+func NewBalancerWithoutAutoReconnect(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Balancer {
+	return newBlanacer(cc, opts, false)
+}
+
+func newBlanacer(cc balancer.ClientConn, opts balancer.BuildOptions, autoReconnect bool) balancer.Balancer {
 	es := &endpointSharding{
-		cc:    cc,
-		bOpts: opts,
+		cc:                  cc,
+		bOpts:               opts,
+		enableAutoReconnect: autoReconnect,
 	}
 	es.children.Store(resolver.NewEndpointMap())
 	return es
@@ -79,12 +98,12 @@ func NewBalancer(cc balancer.ClientConn, opts balancer.BuildOptions) balancer.Ba
 // balancer with child config for every unique Endpoint received. It updates the
 // child states on any update from parent or child.
 type endpointSharding struct {
-	cc    balancer.ClientConn
-	bOpts balancer.BuildOptions
+	cc                  balancer.ClientConn
+	bOpts               balancer.BuildOptions
+	enableAutoReconnect bool
 
 	childMu  sync.Mutex // syncs balancer.Balancer calls into children
 	children atomic.Pointer[resolver.EndpointMap]
-	closed   bool
 
 	// inhibitChildUpdates is set during UpdateClientConnState/ResolverError
 	// calls (calls to children will each produce an update, only want one
@@ -150,9 +169,10 @@ func (es *endpointSharding) UpdateClientConnState(state balancer.ClientConnState
 	// Delete old children that are no longer present.
 	for _, e := range children.Keys() {
 		child, _ := children.Get(e)
-		bal := child.(balancer.Balancer)
+		bal := child.(*balancerWrapper)
 		if _, ok := newChildren.Get(e); !ok {
 			bal.Close()
+			bal.isClosed = true
 		}
 	}
 	es.children.Store(newChildren)
@@ -189,10 +209,10 @@ func (es *endpointSharding) Close() {
 	defer es.childMu.Unlock()
 	children := es.children.Load()
 	for _, child := range children.Values() {
-		bal := child.(balancer.Balancer)
+		bal := child.(*balancerWrapper)
 		bal.Close()
+		bal.isClosed = true
 	}
-	es.closed = true
 }
 
 // updateState updates this component's state. It sends the aggregated state,
@@ -294,24 +314,32 @@ type balancerWrapper struct {
 	es *endpointSharding
 
 	childState ChildState
+
+	// Users must hold `es.childMu`.
+	isClosed bool
 }
 
 func (bw *balancerWrapper) UpdateState(state balancer.State) {
 	bw.es.mu.Lock()
 	bw.childState.State = state
 	bw.es.mu.Unlock()
-	// When a child balancer says it's IDLE, ping it to exit idle and reconnect.
-	// TODO: In the future, perhaps make this a knob in configuration.
-	if ei, ok := bw.Balancer.(balancer.ExitIdler); state.ConnectivityState == connectivity.Idle && ok {
+	if state.ConnectivityState == connectivity.Idle && bw.es.enableAutoReconnect {
+		bw.exitIdle()
+	}
+	bw.es.updateState()
+}
+
+// exitIdle pings an IDLE child balancer to exit idle.
+func (bw *balancerWrapper) exitIdle() {
+	if ei, ok := bw.Balancer.(balancer.ExitIdler); ok {
 		go func() {
 			bw.es.childMu.Lock()
-			if !bw.es.closed {
+			if !bw.isClosed {
 				ei.ExitIdle()
 			}
 			bw.es.childMu.Unlock()
 		}()
 	}
-	bw.es.updateState()
 }
 
 // ParseConfig parses a child config list and returns an LB config to use with
