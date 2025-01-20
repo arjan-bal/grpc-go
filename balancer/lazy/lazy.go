@@ -109,7 +109,7 @@ func (lb *lazyBalancer) ResolverError(err error) {
 func (lb *lazyBalancer) UpdateClientConnState(ccs balancer.ClientConnState) error {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
-	if childLBCfg, ok := ccs.BalancerConfig.(*lbCfg); !ok {
+	if childLBCfg, ok := ccs.BalancerConfig.(lbCfg); !ok {
 		lb.logger.Errorf("Got LB config of unexpected type: %v", ccs.BalancerConfig)
 		ccs.BalancerConfig = nil
 	} else {
@@ -119,12 +119,6 @@ func (lb *lazyBalancer) UpdateClientConnState(ccs balancer.ClientConnState) erro
 		return lb.delegate.UpdateClientConnState(ccs)
 	}
 
-	if childLBCfg, ok := ccs.BalancerConfig.(*lbCfg); !ok {
-		lb.logger.Errorf("Got LB config of unexpected type: %v", ccs.BalancerConfig)
-		ccs.BalancerConfig = nil
-	} else {
-		ccs.BalancerConfig = childLBCfg.childLBCfg
-	}
 	lb.latestClientConnState = &ccs
 	lb.latestResolverError = nil
 	lb.updateBalancerStateLocked()
@@ -147,7 +141,7 @@ func (lb *lazyBalancer) ExitIdle() {
 	}
 	lb.delegate = gracefulswitch.NewBalancer(lb.cc, lb.buildOptions)
 	if lb.latestClientConnState != nil {
-		if err := lb.UpdateClientConnState(*lb.latestClientConnState); err != nil {
+		if err := lb.delegate.UpdateClientConnState(*lb.latestClientConnState); err != nil {
 			if err == balancer.ErrBadResolverState {
 				lb.cc.ResolveNow(resolver.ResolveNowOptions{})
 			} else {
@@ -179,10 +173,9 @@ type lbCfg struct {
 	childLBCfg serviceconfig.LoadBalancingConfig
 }
 
-func (b *builder) ParseConfig(lbConfig json.RawMessage) (serviceconfig.LoadBalancingConfig, error) {
+func (b builder) ParseConfig(lbConfig json.RawMessage) (serviceconfig.LoadBalancingConfig, error) {
 	jsonReprsentation := &struct {
-		ChildPolicy     json.RawMessage
-		NoAutoReconnect bool
+		ChildPolicy json.RawMessage
 	}{}
 	if err := json.Unmarshal(lbConfig, jsonReprsentation); err != nil {
 		return nil, err
@@ -191,7 +184,7 @@ func (b *builder) ParseConfig(lbConfig json.RawMessage) (serviceconfig.LoadBalan
 	if err != nil {
 		return nil, err
 	}
-	return &lbCfg{childLBCfg: childCfg}, nil
+	return lbCfg{childLBCfg: childCfg}, nil
 }
 
 // idlePicker is used when the SubConn is IDLE and kicks the SubConn into

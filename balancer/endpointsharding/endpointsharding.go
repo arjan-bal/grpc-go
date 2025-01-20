@@ -60,16 +60,12 @@ func init() {
 // ChildState is the balancer state of a child along with the endpoint which
 // identifies the child balancer.
 type ChildState struct {
-	Endpoint        resolver.Endpoint
-	State           balancer.State
-	balancerWrapper *balancerWrapper
-}
+	Endpoint resolver.Endpoint
+	State    balancer.State
 
-// ExitIdle pings the child balancer to exit idle state. It calls ExitIdle of
-// the child balancer on a separate goroutine, so callers don't need to handle
-// synchronous picker updates.
-func (cs *ChildState) ExitIdle() {
-	cs.balancerWrapper.exitIdle()
+	// Balancer exposes only the ExitIdler interface of the child LB policy.
+	// Other methods on the child policy are called only by endpointsharding.
+	Balancer balancer.ExitIdler
 }
 
 // NewBalancer returns a load balancing policy that manages homogeneous child
@@ -143,12 +139,17 @@ func (es *endpointSharding) UpdateClientConnState(state balancer.ClientConnState
 		var bal *balancerWrapper
 		if child, ok := children.Get(endpoint); ok {
 			bal = child.(*balancerWrapper)
+			// Endpoint attributes may have changes, update the stored endpoint.
+			es.mu.Lock()
+			bal.childState.Endpoint = endpoint
+			es.mu.Unlock()
 		} else {
 			bal = &balancerWrapper{
 				childState: ChildState{Endpoint: endpoint},
 				ClientConn: es.cc,
 				es:         es,
 			}
+			bal.childState.Balancer = bal
 			bal.Balancer = gracefulswitch.NewBalancer(bal, es.bOpts)
 		}
 		newChildren.Set(endpoint, bal)
@@ -324,13 +325,14 @@ func (bw *balancerWrapper) UpdateState(state balancer.State) {
 	bw.childState.State = state
 	bw.es.mu.Unlock()
 	if state.ConnectivityState == connectivity.Idle && bw.es.enableAutoReconnect {
-		bw.exitIdle()
+		bw.ExitIdle()
 	}
 	bw.es.updateState()
 }
 
-// exitIdle pings an IDLE child balancer to exit idle.
-func (bw *balancerWrapper) exitIdle() {
+// ExitIdle pings an IDLE child balancer to exit idle in a new goroutine to
+// avoid deadlocks due to synchronous balancer state updates.
+func (bw *balancerWrapper) ExitIdle() {
 	if ei, ok := bw.Balancer.(balancer.ExitIdler); ok {
 		go func() {
 			bw.es.childMu.Lock()

@@ -1845,9 +1845,9 @@ func (s) TestRingHash_SwitchToLowerPriorityAndThenBack(t *testing.T) {
 	}
 }
 
-// Tests that when we trigger internal connection attempts without picks, we do
-// so for only one subchannel at a time.
-func (s) TestRingHash_ContinuesConnectingWithoutPicksOneSubchannelAtATime(t *testing.T) {
+// Tests that when we trigger internal connection attempts without picks, we
+// keep retrying all the SubConns that haver reported TF previously.
+func (s) TestRingHash_ContinuesConnectingWithoutPicksToMultipleSubConnsConcurrently(t *testing.T) {
 	backends := startTestServiceBackends(t, 1)
 	unReachableBackends := makeUnreachableBackends(t, 3)
 
@@ -1931,8 +1931,8 @@ func (s) TestRingHash_ContinuesConnectingWithoutPicksOneSubchannelAtATime(t *tes
 	if !holdNonExistent1.Wait(ctx) {
 		t.Fatalf("Timeout waiting for connection attempt to backend 1")
 	}
-	if holdNonExistent0Again.IsStarted() {
-		t.Errorf("Got connection attempt to backend 0 again, expected no connection attempt.")
+	if !holdNonExistent0Again.Wait(ctx) {
+		t.Fatalf("Timeout waiting for re-connection attempt to backend 0")
 	}
 	if holdNonExistent2.IsStarted() {
 		t.Errorf("Got connection attempt to backend 2, expected no connection attempt.")
@@ -1942,39 +1942,29 @@ func (s) TestRingHash_ContinuesConnectingWithoutPicksOneSubchannelAtATime(t *tes
 	}
 
 	// Allow the connection attempt to the second address to resume and wait for
-	// the attempt for the third address.  No other connection attempts should
+	// the attempt for the third address. No new connection attempts should
 	// be started yet.
 	holdNonExistent1Again := dialer.Hold(unReachableBackends[1])
 	holdNonExistent1.Resume()
 	if !holdNonExistent2.Wait(ctx) {
 		t.Fatalf("Timeout waiting for connection attempt to backend 2")
 	}
-	if holdNonExistent0Again.IsStarted() {
-		t.Errorf("Got connection attempt to backend 0 again, expected no connection attempt.")
-	}
-	if holdNonExistent1Again.IsStarted() {
-		t.Errorf("Got connection attempt to backend 1 again, expected no connection attempt.")
+	if !holdNonExistent1Again.Wait(ctx) {
+		t.Fatalf("Timeout waiting for re-connection attempt to backend 1")
 	}
 	if holdGood.IsStarted() {
 		t.Errorf("Got connection attempt to good backend, expected no connection attempt.")
 	}
 
 	// Allow the connection attempt to the third address to resume and wait
-	// for the attempt for the final address. No other connection attempts
-	// should be started yet.
+	// for the attempt for the final address.
 	holdNonExistent2Again := dialer.Hold(unReachableBackends[2])
 	holdNonExistent2.Resume()
+	if !holdNonExistent2Again.Wait(ctx) {
+		t.Fatalf("Timeout waiting for re-connection attempt to backend 2")
+	}
 	if !holdGood.Wait(ctx) {
 		t.Fatalf("Timeout waiting for connection attempt to good backend")
-	}
-	if holdNonExistent0Again.IsStarted() {
-		t.Errorf("Got connection attempt to backend 0 again, expected no connection attempt.")
-	}
-	if holdNonExistent1Again.IsStarted() {
-		t.Errorf("Got connection attempt to backend 1 again, expected no connection attempt.")
-	}
-	if holdNonExistent2Again.IsStarted() {
-		t.Errorf("Got connection attempt to backend 2 again, expected no connection attempt.")
 	}
 
 	// Allow the final attempt to resume.
@@ -1982,15 +1972,4 @@ func (s) TestRingHash_ContinuesConnectingWithoutPicksOneSubchannelAtATime(t *tes
 
 	// Wait for channel to become connected without any pending RPC.
 	testutils.AwaitState(ctx, t, conn, connectivity.Ready)
-
-	// No other connection attempts should have been started
-	if holdNonExistent0Again.IsStarted() {
-		t.Errorf("Got connection attempt to backend 0 again, expected no connection attempt.")
-	}
-	if holdNonExistent1Again.IsStarted() {
-		t.Errorf("Got connection attempt to backend 1 again, expected no connection attempt.")
-	}
-	if holdNonExistent2Again.IsStarted() {
-		t.Errorf("Got connection attempt to backend 2 again, expected no connection attempt.")
-	}
 }
