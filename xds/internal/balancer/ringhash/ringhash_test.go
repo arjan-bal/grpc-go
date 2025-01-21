@@ -258,7 +258,7 @@ func (s) TestThreeSubConnsAffinity(t *testing.T) {
 	// Fail the first SubConn.
 	sc0.UpdateState(balancer.SubConnState{ConnectivityState: connectivity.Connecting})
 	// Each child balancer state update should trigger a picker update.
-	_ = <-cc.NewPickerCh
+	<-cc.NewPickerCh
 	sc0.UpdateState(balancer.SubConnState{ConnectivityState: connectivity.TransientFailure})
 	// Reporting TF will cause the balancer to try connecting to the first
 	// address in the endpoint list.

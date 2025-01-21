@@ -45,8 +45,7 @@ import (
 )
 
 var (
-	defaultTestTimeout      = time.Second * 10
-	defaultTestShortTimeout = time.Millisecond * 10
+	defaultTestTimeout = time.Second * 10
 )
 
 type s struct {
