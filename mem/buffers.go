@@ -27,8 +27,10 @@ package mem
 
 import (
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // A Buffer represents a reference counted piece of data (in bytes) that can be
@@ -73,10 +75,12 @@ func IsBelowBufferPoolingThreshold(size int) bool {
 }
 
 type buffer struct {
-	origData *[]byte
-	data     []byte
-	refs     *atomic.Int32
-	pool     BufferPool
+	origData    *[]byte
+	data        []byte
+	refs        *atomic.Int32
+	pool        BufferPool
+	freeCallers []string
+	refCallers  []string
 }
 
 func newBuffer() *buffer {
@@ -103,8 +107,9 @@ func NewBuffer(data *[]byte, pool BufferPool) Buffer {
 	b.origData = data
 	b.data = *data
 	b.pool = pool
-	b.refs = refObjectPool.Get().(*atomic.Int32)
-	b.refs.Add(1)
+	// Get fresh objects to ensure no existing references.
+	b.refs = &atomic.Int32{}
+	b.Ref()
 	return b
 }
 
@@ -137,10 +142,13 @@ func (b *buffer) Ref() {
 	if b.refs == nil {
 		panic("Cannot ref freed buffer")
 	}
-	b.refs.Add(1)
+	val := b.refs.Add(1)
+	b.refCallers = append(b.refCallers, fmt.Sprintf("Count: %d, time: %s, %s", val, time.Now(), string(debug.Stack())))
+
 }
 
 func (b *buffer) Free() {
+	b.freeCallers = append(b.freeCallers, fmt.Sprintf("Count: %d, time: %q, %s", b.refs.Load(), time.Now(), string(debug.Stack())))
 	if b.refs == nil {
 		panic("Cannot free freed buffer")
 	}
@@ -159,9 +167,19 @@ func (b *buffer) Free() {
 		b.data = nil
 		b.refs = nil
 		b.pool = nil
+		b.refCallers = nil
+		b.freeCallers = nil
 		bufferObjectPool.Put(b)
 	default:
-		panic("Cannot free freed buffer")
+		op := fmt.Sprintf("refCount: %d\nFree callers", refs)
+		for _, c := range b.freeCallers {
+			op = op + "\n\n" + c
+		}
+		op = op + "\nRef callers"
+		for _, c := range b.refCallers {
+			op = op + "\n\n" + c
+		}
+		panic("Cannot free freed buffer" + op)
 	}
 }
 
@@ -174,11 +192,13 @@ func (b *buffer) split(n int) (Buffer, Buffer) {
 		panic("Cannot split freed buffer")
 	}
 
-	b.refs.Add(1)
+	b.Ref()
 	split := newBuffer()
 	split.origData = b.origData
 	split.data = b.data[n:]
 	split.refs = b.refs
+	split.refCallers = append([]string{"\n\nsplit\n\n"}, b.refCallers...)
+	b.refCallers = append(b.refCallers, "\n\nsplit\n\n")
 	split.pool = b.pool
 
 	b.data = b.data[:n]
