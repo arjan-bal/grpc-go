@@ -31,6 +31,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 // A Buffer represents a reference counted piece of data (in bytes) that can be
@@ -171,6 +172,7 @@ func (b *buffer) Free() {
 		b.freeCallers = nil
 		bufferObjectPool.Put(b)
 	default:
+		printMemory(unsafe.Pointer(b.refs), 64) // Inspect 64 bytes around the memory
 		op := fmt.Sprintf("refCount: %d\nFree callers", refs)
 		for _, c := range b.freeCallers {
 			op = op + "\n\n" + c
@@ -180,6 +182,21 @@ func (b *buffer) Free() {
 			op = op + "\n\n" + c
 		}
 		panic("Cannot free freed buffer" + op)
+	}
+}
+
+// Helper function to print memory contents
+func printMemory(ptr unsafe.Pointer, numBytes int) {
+	fmt.Printf("Inspecting %d bytes of memory around %p:\n", numBytes, ptr)
+
+	for i := -numBytes / 2; i < numBytes/2; i++ {
+		// Calculate the address offset
+		bytePtr := unsafe.Pointer(uintptr(ptr) + uintptr(i))
+
+		// Safely read the byte value
+		byteValue := *(*byte)(bytePtr)
+
+		fmt.Printf("Address %p: 0x%02X (%d)\n", bytePtr, byteValue, byteValue)
 	}
 }
 
