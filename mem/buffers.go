@@ -34,6 +34,8 @@ import (
 	"unsafe"
 )
 
+const startCount = 100
+
 // A Buffer represents a reference counted piece of data (in bytes) that can be
 // acquired by a call to NewBuffer() or Copy(). A reference to a Buffer may be
 // released by calling Free(), which invokes the free function given at creation
@@ -110,6 +112,7 @@ func NewBuffer(data *[]byte, pool BufferPool) Buffer {
 	b.pool = pool
 	// Get fresh objects to ensure no existing references.
 	b.refs = &atomic.Int32{}
+	b.refs.Add(startCount)
 	b.Ref()
 	return b
 }
@@ -156,9 +159,9 @@ func (b *buffer) Free() {
 
 	refs := b.refs.Add(-1)
 	switch {
-	case refs > 0:
+	case refs > startCount:
 		return
-	case refs == 0:
+	case refs == startCount:
 		if b.pool != nil {
 			b.pool.Put(b.origData)
 		}
