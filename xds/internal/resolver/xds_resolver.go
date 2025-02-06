@@ -24,6 +24,7 @@ import (
 	"fmt"
 	rand "math/rand/v2"
 	"sync/atomic"
+	"time"
 
 	"google.golang.org/grpc/internal"
 	"google.golang.org/grpc/internal/grpclog"
@@ -67,7 +68,10 @@ func newBuilderWithConfigForTesting(config []byte) (resolver.Builder, error) {
 func newBuilderWithPoolForTesting(pool *xdsclient.Pool) (resolver.Builder, error) {
 	return &xdsResolverBuilder{
 		newXDSClient: func(name string) (xdsclient.XDSClient, func(), error) {
-			return pool.NewClientForTesting(xdsclient.OptionsForTesting{Name: name})
+			return pool.NewClientForTesting(xdsclient.OptionsForTesting{
+				Name:                      name,
+				StreamBackoffAfterFailure: func(i int) time.Duration { return time.Duration(i) * time.Millisecond },
+			})
 		},
 	}, nil
 }
