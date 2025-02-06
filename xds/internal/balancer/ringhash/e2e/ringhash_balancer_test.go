@@ -26,6 +26,7 @@ import (
 	rand "math/rand/v2"
 	"net"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -209,14 +210,29 @@ func channelIDHashRoute(routeName, virtualHostDomain, clusterName string) *v3rou
 func checkRPCSendOK(ctx context.Context, t *testing.T, client testgrpc.TestServiceClient, num int) map[string]int {
 	t.Helper()
 
+	mu := sync.Mutex{}
 	backendCount := make(map[string]int)
-	for i := 0; i < num; i++ {
-		var remote peer.Peer
-		if _, err := client.EmptyCall(ctx, &testpb.Empty{}, grpc.Peer(&remote)); err != nil {
-			t.Fatalf("rpc EmptyCall() failed: %v", err)
-		}
-		backendCount[remote.Addr.String()]++
+	wg := sync.WaitGroup{}
+	batches := 10
+	perBatch := max(1, num/batches)
+	for i := 0; i < num; i = i + perBatch {
+		count := min(perBatch, num-i)
+		wg.Add(count)
+		go func() {
+			for i := 0; i < count; i++ {
+				var remote peer.Peer
+				if _, err := client.EmptyCall(ctx, &testpb.Empty{}, grpc.Peer(&remote)); err != nil {
+					t.Errorf("rpc EmptyCall() failed: %v", err)
+				} else {
+					mu.Lock()
+					backendCount[remote.Addr.String()]++
+					mu.Unlock()
+				}
+				wg.Done()
+			}
+		}()
 	}
+	wg.Wait()
 	return backendCount
 }
 
