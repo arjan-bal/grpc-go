@@ -17,10 +17,22 @@ jobs:
           go-version: "stable"
 
       - name: Run coverage
-        run: go test -coverprofile=coverage.out -coverpkg=./... ./...
+        run: |
+          for MOD_FILE in $(find . -name 'go.mod' | grep -Ev '^\./go\.mod'); do
+            pushd "$(dirname ${MOD_FILE})"
+            # go test ${{ matrix.testflags }} -cpu 1,4 -timeout 2m ./...
+            go test -coverprofile=coverage.out -coverpkg=./... ./...
+            popd
+          done
 
       - name: Run coverage with new pickfirst
-        run: GRPC_EXPERIMENTAL_ENABLE_NEW_PICK_FIRST=true go test -coverprofile=coverage_new_pickfirst.out -coverpkg=./... ./...
+        run: |
+          export GRPC_EXPERIMENTAL_ENABLE_NEW_PICK_FIRST=true
+          for MOD_FILE in $(find . -name 'go.mod' | grep -Ev '^\./go\.mod'); do
+            pushd "$(dirname ${MOD_FILE})"
+            go test -coverprofile=coverage_new_pickfirst.out -coverpkg=./... ./...
+            popd
+          done
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
