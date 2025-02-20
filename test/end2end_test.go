@@ -84,7 +84,9 @@ import (
 const defaultHealthService = "grpc.health.v1.Health"
 
 func init() {
-	channelz.TurnOn()
+	if false {
+		channelz.TurnOn()
+	}
 	balancer.Register(triggerRPCBlockPickerBalancerBuilder{})
 }
 

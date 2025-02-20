@@ -868,6 +868,9 @@ func (s) TestPickFirst_ResolverError_WithPreviousUpdate_TransientFailure(t *test
 
 	addrs := []resolver.Address{{Addr: lis.Addr().String()}}
 	r.UpdateState(resolver.State{Addresses: addrs})
+	time.Sleep(time.Second)
+	channelz.TurnOn()
+
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
 	defer cancel()
 	testutils.AwaitState(ctx, t, cc, connectivity.TransientFailure)
