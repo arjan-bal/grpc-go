@@ -22,6 +22,7 @@
 package channelz
 
 import (
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -41,6 +42,7 @@ var (
 
 // TurnOn turns on channelz data collection.
 func TurnOn() {
+	fmt.Println("Turning on channelz")
 	atomic.StoreInt32(&curState, 1)
 }
 
@@ -152,6 +154,7 @@ func RegisterSubChannel(parent *Channel, ref string) *SubChannel {
 	}
 
 	if !IsOn() {
+		fmt.Println("Not initializing map because channelz is disabled.")
 		return sc
 	}
 

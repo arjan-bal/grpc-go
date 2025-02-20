@@ -358,6 +358,9 @@ func NewHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 	if au, ok := authInfo.(credentials.ChannelzSecurityInfo); ok {
 		czSecurity = au.GetSecurityValue()
 	}
+	// Enable channelz before this.
+	time.Sleep(3 * time.Second)
+	fmt.Println("Creating a socket", channelz.IsOn())
 	t.channelz = channelz.RegisterSocket(
 		&channelz.Socket{
 			SocketType:       channelz.SocketTypeNormal,

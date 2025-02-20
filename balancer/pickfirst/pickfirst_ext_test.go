@@ -57,7 +57,6 @@ const (
 )
 
 func init() {
-	channelz.TurnOn()
 }
 
 type s struct {
@@ -900,6 +899,11 @@ func (s) TestPickFirst_ResolverError_WithPreviousUpdate_TransientFailure(t *test
 	cc.Connect()
 	addrs := []resolver.Address{{Addr: lis.Addr().String()}}
 	r.UpdateState(resolver.State{Addresses: addrs})
+
+	fmt.Println(channelz.IsOn())
+	time.Sleep(time.Second)
+	channelz.TurnOn()
+
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
 	defer cancel()
 	testutils.AwaitState(ctx, t, cc, connectivity.TransientFailure)
