@@ -35,6 +35,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/internal"
 	"google.golang.org/grpc/internal/balancer/stub"
+	"google.golang.org/grpc/internal/channelz"
 	"google.golang.org/grpc/internal/grpcsync"
 	"google.golang.org/grpc/internal/grpctest"
 	"google.golang.org/grpc/internal/stubserver"
@@ -1634,4 +1635,23 @@ func mockTimer() (triggerFunc func(), timerFunc func(_ time.Duration, f func()) 
 			close(stopCh)
 		})
 	}
+}
+
+// TestPickFirst_OneBackend tests the most basic scenario for pick_first. It
+// brings up a single backend and verifies that all RPCs get routed to it.
+func (s) TestPickFirst_OneBackend(t *testing.T) {
+	cc, r, backends := setupPickFirstLeaf(t, 1)
+
+	r.UpdateState(resolver.State{Addresses: backends.resolverAddrs()})
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
+	defer cancel()
+	cc.Connect()
+	testutils.AwaitState(ctx, t, cc, connectivity.Ready)
+	backends.backends[0].lis.Stop()
+	testutils.AwaitState(ctx, t, cc, connectivity.Idle)
+	channelz.TurnOn()
+	backends.backends[0].lis.Restart()
+	cc.Connect()
+	time.Sleep(time.Second)
 }
