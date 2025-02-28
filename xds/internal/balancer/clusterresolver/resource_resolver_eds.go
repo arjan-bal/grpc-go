@@ -19,7 +19,9 @@
 package clusterresolver
 
 import (
+	"fmt"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc/internal/grpclog"
 	"google.golang.org/grpc/internal/grpcsync"
@@ -85,6 +87,9 @@ func (er *edsDiscoveryMechanism) OnUpdate(update *xdsresource.EndpointsResourceD
 	er.mu.Lock()
 	er.update = &update.Resource
 	er.mu.Unlock()
+
+	fmt.Println("Introducing fake delay in EDS update")
+	time.Sleep(1 * time.Second)
 
 	er.topLevelResolver.onUpdate(onDone)
 }

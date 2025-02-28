@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"google.golang.org/grpc/balancer"
@@ -415,6 +416,7 @@ func (b *cdsBalancer) Close() {
 }
 
 func (b *cdsBalancer) ExitIdle() {
+	time.Sleep(50 * time.Millisecond)
 	b.serializer.TrySchedule(func(context.Context) {
 		if b.childLB == nil {
 			b.logger.Warningf("Received ExitIdle with no child policy")
