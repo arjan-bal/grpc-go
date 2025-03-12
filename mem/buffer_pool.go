@@ -120,7 +120,7 @@ type sizedBufferPool struct {
 func (p *sizedBufferPool) Get(size int) *[]byte {
 	buf := p.pool.Get().(*[]byte)
 	b := *buf
-	clear(b[:cap(b)])
+	// clear(b[:cap(b)])
 	*buf = b[:size]
 	return buf
 }
