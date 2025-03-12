@@ -21,8 +21,10 @@
 package conn
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"net"
 
@@ -81,6 +83,7 @@ func RegisterProtocol(protocol string, f ALTSRecordFunc) error {
 // conn represents a secured connection. It implements the net.Conn interface.
 type conn struct {
 	net.Conn
+	reader io.Reader
 	crypto ALTSRecordCrypto
 	// buf holds data that has been read from the connection and decrypted,
 	// but has not yet been returned by Read.
@@ -129,6 +132,7 @@ func NewConn(c net.Conn, side core.Side, recordProtocol string, key []byte, prot
 
 	altsConn := &conn{
 		Conn:               c,
+		reader:             bufio.NewReaderSize(c, 4*altsRecordDefaultLength),
 		crypto:             crypto,
 		payloadLengthLimit: payloadLengthLimit,
 		protected:          protectedBuf,
@@ -166,7 +170,7 @@ func (p *conn) Read(b []byte) (n int, err error) {
 				copy(tmp, p.protected)
 				p.protected = tmp
 			}
-			n, err = p.Conn.Read(p.protected[len(p.protected):min(cap(p.protected), len(p.protected)+altsRecordDefaultLength)])
+			n, err = p.reader.Read(p.protected[len(p.protected):min(cap(p.protected), len(p.protected)+altsRecordDefaultLength)])
 			if err != nil {
 				return 0, err
 			}
