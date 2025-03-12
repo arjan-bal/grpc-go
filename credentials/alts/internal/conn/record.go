@@ -132,7 +132,7 @@ func NewConn(c net.Conn, side core.Side, recordProtocol string, key []byte, prot
 
 	altsConn := &conn{
 		Conn:               c,
-		reader:             bufio.NewReaderSize(c, 4*altsRecordDefaultLength),
+		reader:             bufio.NewReaderSize(c, altsWriteBufferInitialSize), // 32KB
 		crypto:             crypto,
 		payloadLengthLimit: payloadLengthLimit,
 		protected:          protectedBuf,
