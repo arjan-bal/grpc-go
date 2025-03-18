@@ -23,12 +23,10 @@ package conn
 import (
 	"encoding/binary"
 	"fmt"
-	"io"
 	"math"
 	"net"
 
 	core "google.golang.org/grpc/credentials/alts/internal"
-	"google.golang.org/grpc/mem"
 )
 
 // ALTSRecordCrypto is the interface for gRPC ALTS record protocol.
@@ -83,23 +81,21 @@ func RegisterProtocol(protocol string, f ALTSRecordFunc) error {
 // conn represents a secured connection. It implements the net.Conn interface.
 type conn struct {
 	net.Conn
-	reader io.Reader
 	crypto ALTSRecordCrypto
 	// buf holds data that has been read from the connection and decrypted,
 	// but has not yet been returned by Read.
 	buf                []byte
-	messageBuf         *[]byte
 	payloadLengthLimit int
-	// protectedBytesRead holds data read from the network but have not yet been
+	// protected holds data read from the network but have not yet been
 	// decrypted. This data might not compose a complete frame.
 	protected []byte
 	// writeBuf is a buffer used to contain encrypted frames before being
 	// written to the network.
-	writeBuf *[]byte
+	writeBuf []byte
+	// nextFrame stores the next frame (in protected buffer) info.
+	nextFrame []byte
 	// overhead is the calculated overhead of each frame.
 	overhead int
-	// headerBuf is a buffer used to read header bytes.
-	headerBuf []byte
 }
 
 // NewConn creates a new secure channel instance given the other party role and
@@ -115,33 +111,32 @@ func NewConn(c net.Conn, side core.Side, recordProtocol string, key []byte, prot
 	}
 	overhead := MsgLenFieldSize + msgTypeFieldSize + crypto.EncryptionOverhead()
 	payloadLengthLimit := altsRecordDefaultLength - overhead
+	var protectedBuf []byte
+	if protected == nil {
+		// We pre-allocate protected to be of size
+		// 2*altsRecordDefaultLength-1 during initialization. We only
+		// read from the network into protected when protected does not
+		// contain a complete frame, which is at most
+		// altsRecordDefaultLength-1 (bytes). And we read at most
+		// altsRecordDefaultLength (bytes) data into protected at one
+		// time. Therefore, 2*altsRecordDefaultLength-1 is large enough
+		// to buffer data read from the network.
+		protectedBuf = make([]byte, 0, 2*altsRecordDefaultLength-1)
+	} else {
+		protectedBuf = make([]byte, len(protected))
+		copy(protectedBuf, protected)
+	}
 
 	altsConn := &conn{
 		Conn:               c,
 		crypto:             crypto,
 		payloadLengthLimit: payloadLengthLimit,
-		protected:          protected,
-		writeBuf:           mem.DefaultBufferPool().Get(altsWriteBufferInitialSize),
+		protected:          protectedBuf,
+		writeBuf:           make([]byte, altsWriteBufferInitialSize),
+		nextFrame:          protectedBuf,
 		overhead:           overhead,
-		headerBuf:          make([]byte, MsgLenFieldSize),
 	}
 	return altsConn, nil
-}
-
-func (p *conn) readBytes(b []byte) (int, error) {
-	bytesRead := 0
-	if len(p.protected) > 0 {
-		bytesRead = copy(b, p.protected)
-		p.protected = p.protected[bytesRead:]
-	}
-	for bytesRead < len(b) {
-		n, err := p.Conn.Read(b[bytesRead:])
-		bytesRead += n
-		if err != nil {
-			return bytesRead, err
-		}
-	}
-	return bytesRead, nil
 }
 
 // Read reads and decrypts a frame from the underlying connection, and copies the
@@ -150,36 +145,45 @@ func (p *conn) readBytes(b []byte) (int, error) {
 // to Read will read from this buffer until it is exhausted.
 func (p *conn) Read(b []byte) (n int, err error) {
 	if len(p.buf) == 0 {
-		// Read and decrypt a new message from the network. Read the header.
-		if _, err := p.readBytes(p.headerBuf); err != nil {
-			return 0, err
+		var framedMsg []byte
+		framedMsg, p.nextFrame, err = ParseFramedMsg(p.nextFrame, altsRecordLengthLimit)
+		if err != nil {
+			return n, err
 		}
-		// Read message body.
-		messageLength := binary.LittleEndian.Uint32(p.headerBuf)
-		if messageLength > altsRecordLengthLimit {
-			return 0, fmt.Errorf("received the frame length %d larger than the limit %d", messageLength, altsRecordLengthLimit)
+		// Check whether the next frame to be decrypted has been
+		// completely received yet.
+		if len(framedMsg) == 0 {
+			copy(p.protected, p.nextFrame)
+			p.protected = p.protected[:len(p.nextFrame)]
+			// Always copy next incomplete frame to the beginning of
+			// the protected buffer and reset nextFrame to it.
+			p.nextFrame = p.protected
 		}
-
-		p.messageBuf = mem.DefaultBufferPool().Get(int(messageLength))
-		if _, err := p.readBytes(*p.messageBuf); err != nil {
-			fmt.Println("MessageBuf: ", p.messageBuf, "Error: ", err)
-			mem.DefaultBufferPool().Put(p.messageBuf)
-			p.messageBuf = nil
-			return 0, err
+		// Check whether a complete frame has been received yet.
+		for len(framedMsg) == 0 {
+			if len(p.protected) == cap(p.protected) {
+				tmp := make([]byte, len(p.protected), cap(p.protected)+altsRecordDefaultLength)
+				copy(tmp, p.protected)
+				p.protected = tmp
+			}
+			n, err = p.Conn.Read(p.protected[len(p.protected):min(cap(p.protected), len(p.protected)+altsRecordDefaultLength)])
+			if err != nil {
+				return 0, err
+			}
+			p.protected = p.protected[:len(p.protected)+n]
+			framedMsg, p.nextFrame, err = ParseFramedMsg(p.protected, altsRecordLengthLimit)
+			if err != nil {
+				return 0, err
+			}
 		}
-
 		// Now we have a complete frame, decrypted it.
-		if len(*p.messageBuf) < msgTypeFieldSize {
-			fmt.Println("Message length", messageLength, "buffer length", len(*p.messageBuf))
-		}
-		msgType := binary.LittleEndian.Uint32((*p.messageBuf)[:msgTypeFieldSize])
+		msg := framedMsg[MsgLenFieldSize:]
+		msgType := binary.LittleEndian.Uint32(msg[:msgTypeFieldSize])
 		if msgType&0xff != altsRecordMsgType {
-			mem.DefaultBufferPool().Put(p.messageBuf)
-			p.messageBuf = nil
 			return 0, fmt.Errorf("received frame with incorrect message type %v, expected lower byte %v",
 				msgType, altsRecordMsgType)
 		}
-		ciphertext := (*p.messageBuf)[msgTypeFieldSize:]
+		ciphertext := msg[msgTypeFieldSize:]
 
 		// Decrypt requires that if the dst and ciphertext alias, they
 		// must alias exactly. Code here used to use msg[:0], but msg
@@ -190,33 +194,13 @@ func (p *conn) Read(b []byte) (n int, err error) {
 		// check: https://golang.org/pkg/crypto/cipher/#AEAD.
 		p.buf, err = p.crypto.Decrypt(ciphertext[:0], ciphertext)
 		if err != nil {
-			mem.DefaultBufferPool().Put(p.messageBuf)
-			p.messageBuf = nil
 			return 0, err
 		}
 	}
 
 	n = copy(b, p.buf)
 	p.buf = p.buf[n:]
-
-	if len(p.buf) == 0 {
-		mem.DefaultBufferPool().Put(p.messageBuf)
-		p.messageBuf = nil
-	}
-
 	return n, nil
-}
-
-func (p *conn) Close() error {
-	if p.writeBuf != nil {
-		mem.DefaultBufferPool().Put(p.writeBuf)
-		p.writeBuf = nil
-	}
-	if p.messageBuf != nil {
-		mem.DefaultBufferPool().Put(p.messageBuf)
-		p.messageBuf = nil
-	}
-	return p.Conn.Close()
 }
 
 // Write encrypts, frames, and writes bytes from b to the underlying connection.
@@ -232,9 +216,8 @@ func (p *conn) Write(b []byte) (n int, err error) {
 		const numOfFramesInMaxWriteBuf = altsWriteBufferMaxSize / altsRecordDefaultLength
 		partialBSize = numOfFramesInMaxWriteBuf * p.payloadLengthLimit
 	}
-	if len(*p.writeBuf) < size {
-		mem.DefaultBufferPool().Put(p.writeBuf)
-		p.writeBuf = mem.DefaultBufferPool().Get(size)
+	if len(p.writeBuf) < size {
+		p.writeBuf = make([]byte, size)
 	}
 
 	for partialBStart := 0; partialBStart < len(b); partialBStart += partialBSize {
@@ -256,7 +239,7 @@ func (p *conn) Write(b []byte) (n int, err error) {
 			// if any.
 
 			// 1. Fill in type field.
-			msg := (*p.writeBuf)[writeBufIndex+MsgLenFieldSize:]
+			msg := p.writeBuf[writeBufIndex+MsgLenFieldSize:]
 			binary.LittleEndian.PutUint32(msg, altsRecordMsgType)
 
 			// 2. Encrypt the payload and create a tag if any.
@@ -266,12 +249,12 @@ func (p *conn) Write(b []byte) (n int, err error) {
 			}
 
 			// 3. Fill in the size field.
-			binary.LittleEndian.PutUint32((*p.writeBuf)[writeBufIndex:], uint32(len(msg)))
+			binary.LittleEndian.PutUint32(p.writeBuf[writeBufIndex:], uint32(len(msg)))
 
 			// 4. Increase writeBufIndex.
 			writeBufIndex += len(buf) + p.overhead
 		}
-		nn, err := p.Conn.Write((*p.writeBuf)[:writeBufIndex])
+		nn, err := p.Conn.Write(p.writeBuf[:writeBufIndex])
 		if err != nil {
 			// We need to calculate the actual data size that was
 			// written. This means we need to remove header,
