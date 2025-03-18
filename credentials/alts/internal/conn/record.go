@@ -162,12 +162,16 @@ func (p *conn) Read(b []byte) (n int, err error) {
 
 		p.messageBuf = mem.DefaultBufferPool().Get(int(messageLength))
 		if _, err := p.readBytes(*p.messageBuf); err != nil {
+			fmt.Println("MessageBuf: ", p.messageBuf, "Error: ", err)
 			mem.DefaultBufferPool().Put(p.messageBuf)
 			p.messageBuf = nil
 			return 0, err
 		}
 
 		// Now we have a complete frame, decrypted it.
+		if len(*p.messageBuf) < msgTypeFieldSize {
+			fmt.Println("Message length", messageLength, "buffer length", len(*p.messageBuf))
+		}
 		msgType := binary.LittleEndian.Uint32((*p.messageBuf)[:msgTypeFieldSize])
 		if msgType&0xff != altsRecordMsgType {
 			mem.DefaultBufferPool().Put(p.messageBuf)
