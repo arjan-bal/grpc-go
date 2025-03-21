@@ -85,6 +85,7 @@ type conn struct {
 	// buf holds data that has been read from the connection and decrypted,
 	// but has not yet been returned by Read.
 	buf                []byte
+	obuf               []byte
 	payloadLengthLimit int
 	// protected holds data read from the network but have not yet been
 	// decrypted. This data might not compose a complete frame.
@@ -121,7 +122,7 @@ func NewConn(c net.Conn, side core.Side, recordProtocol string, key []byte, prot
 		// altsRecordDefaultLength (bytes) data into protected at one
 		// time. Therefore, 2*altsRecordDefaultLength-1 is large enough
 		// to buffer data read from the network.
-		protectedBuf = make([]byte, 0, 2*altsRecordDefaultLength-1)
+		protectedBuf = make([]byte, 0, 128*1024)
 	} else {
 		protectedBuf = make([]byte, len(protected))
 		copy(protectedBuf, protected)
@@ -135,6 +136,7 @@ func NewConn(c net.Conn, side core.Side, recordProtocol string, key []byte, prot
 		writeBuf:           make([]byte, altsWriteBufferInitialSize),
 		nextFrame:          protectedBuf,
 		overhead:           overhead,
+		obuf:               make([]byte, 256*1024),
 	}
 	return altsConn, nil
 }
@@ -144,6 +146,7 @@ func NewConn(c net.Conn, side core.Side, recordProtocol string, key []byte, prot
 // Read retains the remaining bytes in an internal buffer, and subsequent calls
 // to Read will read from this buffer until it is exhausted.
 func (p *conn) Read(b []byte) (n int, err error) {
+	origCap := cap(b)
 	if len(p.buf) == 0 {
 		var framedMsg []byte
 		framedMsg, p.nextFrame, err = ParseFramedMsg(p.nextFrame, altsRecordLengthLimit)
@@ -162,11 +165,11 @@ func (p *conn) Read(b []byte) (n int, err error) {
 		// Check whether a complete frame has been received yet.
 		for len(framedMsg) == 0 {
 			if len(p.protected) == cap(p.protected) {
-				tmp := make([]byte, len(p.protected), cap(p.protected)+altsRecordDefaultLength)
+				tmp := make([]byte, len(p.protected), cap(p.protected)+32*1024)
 				copy(tmp, p.protected)
 				p.protected = tmp
 			}
-			n, err = p.Conn.Read(p.protected[len(p.protected):min(cap(p.protected), len(p.protected)+altsRecordDefaultLength)])
+			n, err = p.Conn.Read(p.protected[len(p.protected):cap(p.protected)])
 			if err != nil {
 				return 0, err
 			}
@@ -176,31 +179,63 @@ func (p *conn) Read(b []byte) (n int, err error) {
 				return 0, err
 			}
 		}
-		// Now we have a complete frame, decrypted it.
-		msg := framedMsg[MsgLenFieldSize:]
-		msgType := binary.LittleEndian.Uint32(msg[:msgTypeFieldSize])
-		if msgType&0xff != altsRecordMsgType {
-			return 0, fmt.Errorf("received frame with incorrect message type %v, expected lower byte %v",
-				msgType, altsRecordMsgType)
-		}
-		ciphertext := msg[msgTypeFieldSize:]
 
-		// Decrypt requires that if the dst and ciphertext alias, they
-		// must alias exactly. Code here used to use msg[:0], but msg
-		// starts MsgLenFieldSize+msgTypeFieldSize bytes earlier than
-		// ciphertext, so they alias inexactly. Using ciphertext[:0]
-		// arranges the appropriate aliasing without needing to copy
-		// ciphertext or use a separate destination buffer. For more info
-		// check: https://golang.org/pkg/crypto/cipher/#AEAD.
-		p.buf, err = p.crypto.Decrypt(ciphertext[:0], ciphertext)
-		if err != nil {
-			return 0, err
+		framedMessages := [][]byte{framedMsg}
+		// Read additional framed messages also if possible.
+		for {
+			framedMsg, p.nextFrame, err = ParseFramedMsg(p.nextFrame, altsRecordLengthLimit)
+			if err != nil {
+				return 0, err
+			}
+			if len(framedMsg) == 0 {
+				break
+			}
+			framedMessages = append(framedMessages, framedMsg)
 		}
+
+		buf := p.obuf
+
+		// Now we have a complete frame, decrypted it.
+		for i := range framedMessages {
+			framedMsg := framedMessages[i]
+			msg := framedMsg[MsgLenFieldSize:]
+			msgType := binary.LittleEndian.Uint32(msg[:msgTypeFieldSize])
+			if msgType&0xff != altsRecordMsgType {
+				return 0, fmt.Errorf("received frame with incorrect message type %v, expected lower byte %v",
+					msgType, altsRecordMsgType)
+			}
+			ciphertext := msg[msgTypeFieldSize:]
+
+			// Decrypt requires that if the dst and ciphertext alias, they
+			// must alias exactly. Code here used to use msg[:0], but msg
+			// starts MsgLenFieldSize+msgTypeFieldSize bytes earlier than
+			// ciphertext, so they alias inexactly. Using ciphertext[:0]
+			// arranges the appropriate aliasing without needing to copy
+			// ciphertext or use a separate destination buffer. For more info
+			// check: https://golang.org/pkg/crypto/cipher/#AEAD.
+			dec, err := p.crypto.Decrypt(ciphertext[:0], ciphertext)
+			if err != nil {
+				return 0, err
+			}
+			if len(b) > 0 {
+				n := copy(b, dec)
+				b = b[n:]
+				dec = dec[n:]
+			}
+			if len(dec) > 0 {
+				n := copy(buf, dec)
+				buf = buf[n:]
+			}
+		}
+		p.buf = p.obuf[:cap(p.obuf)-cap(buf)]
 	}
 
-	n = copy(b, p.buf)
-	p.buf = p.buf[n:]
-	return n, nil
+	if len(b) > 0 {
+		n := copy(b, p.buf)
+		p.buf = p.buf[n:]
+		b = b[n:]
+	}
+	return origCap - cap(b), nil
 }
 
 // Write encrypts, frames, and writes bytes from b to the underlying connection.

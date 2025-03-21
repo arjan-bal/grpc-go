@@ -20,7 +20,6 @@
 package handshaker
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -109,20 +108,6 @@ func DefaultServerHandshakerOptions() *ServerHandshakerOptions {
 	return &ServerHandshakerOptions{}
 }
 
-// To read a response from a net.Conn, http.ReadResponse() takes a bufio.Reader.
-// It's possible that this reader reads more than what's need for the response and stores
-// those bytes in the buffer.
-// bufConn wraps the original net.Conn and the bufio.Reader to make sure we don't lose the
-// bytes in the buffer.
-type bufConn struct {
-	net.Conn
-	r io.Reader
-}
-
-func (c *bufConn) Read(b []byte) (int, error) {
-	return c.r.Read(b)
-}
-
 // altsHandshaker is used to complete an ALTS handshake between client and
 // server. This handshaker talks to the ALTS handshaker service in the metadata
 // server.
@@ -147,7 +132,7 @@ type altsHandshaker struct {
 func NewClientHandshaker(_ context.Context, conn *grpc.ClientConn, c net.Conn, opts *ClientHandshakerOptions) (core.Handshaker, error) {
 	return &altsHandshaker{
 		stream:     nil,
-		conn:       &bufConn{Conn: c, r: bufio.NewReaderSize(c, 32*1024)},
+		conn:       c,
 		clientConn: conn,
 		clientOpts: opts,
 		side:       core.ClientSide,
@@ -160,7 +145,7 @@ func NewClientHandshaker(_ context.Context, conn *grpc.ClientConn, c net.Conn, o
 func NewServerHandshaker(_ context.Context, conn *grpc.ClientConn, c net.Conn, opts *ServerHandshakerOptions) (core.Handshaker, error) {
 	return &altsHandshaker{
 		stream:     nil,
-		conn:       &bufConn{Conn: c, r: bufio.NewReaderSize(c, 32*1024)},
+		conn:       c,
 		clientConn: conn,
 		serverOpts: opts,
 		side:       core.ServerSide,
