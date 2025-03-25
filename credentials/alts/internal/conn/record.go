@@ -122,7 +122,7 @@ func NewConn(c net.Conn, side core.Side, recordProtocol string, key []byte, prot
 		// altsRecordDefaultLength (bytes) data into protected at one
 		// time. Therefore, 2*altsRecordDefaultLength-1 is large enough
 		// to buffer data read from the network.
-		protectedBuf = make([]byte, 0, 32*1024)
+		protectedBuf = make([]byte, 0, 64*1024)
 	} else {
 		protectedBuf = make([]byte, len(protected))
 		copy(protectedBuf, protected)
@@ -136,7 +136,7 @@ func NewConn(c net.Conn, side core.Side, recordProtocol string, key []byte, prot
 		writeBuf:           make([]byte, altsWriteBufferInitialSize),
 		nextFrame:          protectedBuf,
 		overhead:           overhead,
-		obuf:               make([]byte, 64*1024),
+		obuf:               make([]byte, 128*1024),
 	}
 	return altsConn, nil
 }
@@ -196,7 +196,6 @@ func (p *conn) Read(b []byte) (n int, err error) {
 
 		// Now we have a complete frame, decrypted it.
 		for i := range framedMessages {
-			fmt.Println("Message len:", len(framedMessages[i]))
 			framedMsg := framedMessages[i]
 			msg := framedMsg[MsgLenFieldSize:]
 			msgType := binary.LittleEndian.Uint32(msg[:msgTypeFieldSize])
