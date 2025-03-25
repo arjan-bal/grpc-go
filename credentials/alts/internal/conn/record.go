@@ -196,6 +196,7 @@ func (p *conn) Read(b []byte) (n int, err error) {
 
 		// Now we have a complete frame, decrypted it.
 		for i := range framedMessages {
+			fmt.Println("Message len:", len(framedMessages[i]))
 			framedMsg := framedMessages[i]
 			msg := framedMsg[MsgLenFieldSize:]
 			msgType := binary.LittleEndian.Uint32(msg[:msgTypeFieldSize])
