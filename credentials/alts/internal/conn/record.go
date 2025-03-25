@@ -197,6 +197,7 @@ func (p *conn) Read(b []byte) (n int, err error) {
 		// Now we have a complete frame, decrypted it.
 		for i := range framedMessages {
 			framedMsg := framedMessages[i]
+			fmt.Println("ALTS frame length: ", len(framedMsg))
 			msg := framedMsg[MsgLenFieldSize:]
 			msgType := binary.LittleEndian.Uint32(msg[:msgTypeFieldSize])
 			if msgType&0xff != altsRecordMsgType {
