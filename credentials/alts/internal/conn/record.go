@@ -146,7 +146,6 @@ func NewConn(c net.Conn, side core.Side, recordProtocol string, key []byte, prot
 // Read retains the remaining bytes in an internal buffer, and subsequent calls
 // to Read will read from this buffer until it is exhausted.
 func (p *conn) Read(b []byte) (n int, err error) {
-	origCap := cap(b)
 	if len(p.buf) == 0 {
 		var framedMsg []byte
 		framedMsg, p.nextFrame, err = ParseFramedMsg(p.nextFrame, altsRecordLengthLimit)
@@ -213,29 +212,18 @@ func (p *conn) Read(b []byte) (n int, err error) {
 			// arranges the appropriate aliasing without needing to copy
 			// ciphertext or use a separate destination buffer. For more info
 			// check: https://golang.org/pkg/crypto/cipher/#AEAD.
-			dec, err := p.crypto.Decrypt(ciphertext[:0], ciphertext)
+			dec, err := p.crypto.Decrypt(buf[:0], ciphertext)
 			if err != nil {
 				return 0, err
 			}
-			if len(b) > 0 {
-				n := copy(b, dec)
-				b = b[n:]
-				dec = dec[n:]
-			}
-			if len(dec) > 0 {
-				n := copy(buf, dec)
-				buf = buf[n:]
-			}
+			buf = buf[len(dec):]
 		}
 		p.buf = p.obuf[:cap(p.obuf)-cap(buf)]
 	}
 
-	if len(b) > 0 {
-		n := copy(b, p.buf)
-		p.buf = p.buf[n:]
-		b = b[n:]
-	}
-	return origCap - cap(b), nil
+	n = copy(b, p.buf)
+	p.buf = p.buf[n:]
+	return n, nil
 }
 
 // Write encrypts, frames, and writes bytes from b to the underlying connection.
