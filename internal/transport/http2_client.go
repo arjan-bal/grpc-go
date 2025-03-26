@@ -26,11 +26,13 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -89,6 +91,8 @@ type http2Client struct {
 	goAway        chan struct{}
 	keepaliveDone chan struct{} // Closed when the keepalive goroutine exits.
 	framer        *framer
+	framerReadBuf *[]byte // Buffer from pool.
+
 	// controlBuf delivers all the control related tasks (e.g., window
 	// updates, reset streams, and various settings) to the controller.
 	// Do not access controlBuf with mu held.
@@ -337,6 +341,7 @@ func NewHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 		goAway:                make(chan struct{}),
 		keepaliveDone:         make(chan struct{}),
 		framer:                newFramer(conn, writeBufSize, readBufSize, opts.SharedWriteBuffer, maxHeaderListSize),
+		framerReadBuf:         mem.DefaultBufferPool().Get(http2MaxFrameLen * 2),
 		fc:                    &trInFlow{limit: uint32(icwz)},
 		scheme:                scheme,
 		activeStreams:         make(map[uint32]*ClientStream),
@@ -1208,7 +1213,13 @@ func (t *http2Client) handleData(f *http2.DataFrame) {
 				// always initialized with a BufferPool.
 				pool = mem.DefaultBufferPool()
 			}
-			s.write(recvMsg{buffer: mem.Copy(f.Data(), pool)})
+			wb := &wrappedBuf{
+				Buffer:         mem.SliceBuffer(f.Data()),
+				originalBuffer: mem.NewBuffer(t.framerReadBuf, pool),
+			}
+			s.write(recvMsg{buffer: wb})
+			t.framerReadBuf = pool.Get(http2MaxFrameLen * 2)
+			swapInternalBuffer(t.framer.fr, *t.framerReadBuf)
 		}
 	}
 	// The server has closed the stream without sending trailers.  Record that
@@ -1216,6 +1227,25 @@ func (t *http2Client) handleData(f *http2.DataFrame) {
 	if f.StreamEnded() {
 		t.closeStream(s, io.EOF, false, http2.ErrCodeNo, status.New(codes.Internal, "server closed the stream without sending trailers"), nil, true)
 	}
+}
+
+type wrappedBuf struct {
+	mem.Buffer
+	originalBuffer mem.Buffer
+}
+
+func (w *wrappedBuf) Free() {
+	w.originalBuffer.Free()
+}
+
+func (w *wrappedBuf) Ref() {
+	w.originalBuffer.Ref()
+}
+
+func swapInternalBuffer(f *http2.Framer, newBuf []byte) {
+	val := reflect.ValueOf(f).Elem()
+	field := val.FieldByName("readBuf")
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(newBuf))
 }
 
 func (t *http2Client) handleRSTStream(f *http2.RSTStreamFrame) {
