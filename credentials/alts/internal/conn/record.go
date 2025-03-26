@@ -179,45 +179,29 @@ func (p *conn) Read(b []byte) (n int, err error) {
 			}
 		}
 
-		framedMessages := [][]byte{framedMsg}
-		// Read additional framed messages also if possible.
-		for {
-			framedMsg, p.nextFrame, err = ParseFramedMsg(p.nextFrame, altsRecordLengthLimit)
-			if err != nil {
-				return 0, err
-			}
-			if len(framedMsg) == 0 {
-				break
-			}
-			framedMessages = append(framedMessages, framedMsg)
-		}
-
 		buf := p.obuf
 
 		// Now we have a complete frame, decrypted it.
-		for i := range framedMessages {
-			framedMsg := framedMessages[i]
-			msg := framedMsg[MsgLenFieldSize:]
-			msgType := binary.LittleEndian.Uint32(msg[:msgTypeFieldSize])
-			if msgType&0xff != altsRecordMsgType {
-				return 0, fmt.Errorf("received frame with incorrect message type %v, expected lower byte %v",
-					msgType, altsRecordMsgType)
-			}
-			ciphertext := msg[msgTypeFieldSize:]
-
-			// Decrypt requires that if the dst and ciphertext alias, they
-			// must alias exactly. Code here used to use msg[:0], but msg
-			// starts MsgLenFieldSize+msgTypeFieldSize bytes earlier than
-			// ciphertext, so they alias inexactly. Using ciphertext[:0]
-			// arranges the appropriate aliasing without needing to copy
-			// ciphertext or use a separate destination buffer. For more info
-			// check: https://golang.org/pkg/crypto/cipher/#AEAD.
-			dec, err := p.crypto.Decrypt(buf[:0], ciphertext)
-			if err != nil {
-				return 0, err
-			}
-			buf = buf[len(dec):]
+		msg := framedMsg[MsgLenFieldSize:]
+		msgType := binary.LittleEndian.Uint32(msg[:msgTypeFieldSize])
+		if msgType&0xff != altsRecordMsgType {
+			return 0, fmt.Errorf("received frame with incorrect message type %v, expected lower byte %v",
+				msgType, altsRecordMsgType)
 		}
+		ciphertext := msg[msgTypeFieldSize:]
+
+		// Decrypt requires that if the dst and ciphertext alias, they
+		// must alias exactly. Code here used to use msg[:0], but msg
+		// starts MsgLenFieldSize+msgTypeFieldSize bytes earlier than
+		// ciphertext, so they alias inexactly. Using ciphertext[:0]
+		// arranges the appropriate aliasing without needing to copy
+		// ciphertext or use a separate destination buffer. For more info
+		// check: https://golang.org/pkg/crypto/cipher/#AEAD.
+		dec, err := p.crypto.Decrypt(buf[:0], ciphertext)
+		if err != nil {
+			return 0, err
+		}
+		buf = buf[len(dec):]
 		p.buf = p.obuf[:cap(p.obuf)-cap(buf)]
 	}
 
