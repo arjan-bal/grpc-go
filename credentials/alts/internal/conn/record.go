@@ -201,15 +201,12 @@ func (p *conn) Read(b []byte) (n int, err error) {
 			// Decrypt directly into the buffer, avoiding a copy.
 			dst = b[:0]
 			usedOrigBuf = true
-		} else {
-			fmt.Println("Not decoding into original buf:", len(b), "vs", len(msg))
 		}
 		dec, err := p.crypto.Decrypt(dst, ciphertext)
 		if err != nil {
 			return 0, err
 		}
 		if usedOrigBuf {
-			fmt.Println("Decoded directly into original buf")
 			return len(dec), nil
 		}
 		p.buf = p.obuf[:len(dec)]
