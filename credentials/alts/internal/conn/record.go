@@ -179,8 +179,6 @@ func (p *conn) Read(b []byte) (n int, err error) {
 			}
 		}
 
-		buf := p.obuf
-
 		// Now we have a complete frame, decrypted it.
 		msg := framedMsg[MsgLenFieldSize:]
 		msgType := binary.LittleEndian.Uint32(msg[:msgTypeFieldSize])
@@ -197,12 +195,24 @@ func (p *conn) Read(b []byte) (n int, err error) {
 		// arranges the appropriate aliasing without needing to copy
 		// ciphertext or use a separate destination buffer. For more info
 		// check: https://golang.org/pkg/crypto/cipher/#AEAD.
-		dec, err := p.crypto.Decrypt(buf[:0], ciphertext)
+		dst := p.obuf[:0]
+		usedOrigBuf := false
+		if len(b) >= len(msg) {
+			// Decrypt directly into the buffer, avoiding a copy.
+			dst = b[:0]
+			usedOrigBuf = true
+		} else {
+			fmt.Println("Not decoding into original buf:", len(b), "vs", len(msg))
+		}
+		dec, err := p.crypto.Decrypt(dst, ciphertext)
 		if err != nil {
 			return 0, err
 		}
-		buf = buf[len(dec):]
-		p.buf = p.obuf[:cap(p.obuf)-cap(buf)]
+		if usedOrigBuf {
+			fmt.Println("Decoded directly into original buf")
+			return len(dec), nil
+		}
+		p.buf = p.obuf[:len(dec)]
 	}
 
 	n = copy(b, p.buf)
