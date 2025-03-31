@@ -402,7 +402,7 @@ func newFramer(conn net.Conn, writeBufferSize, readBufferSize int, sharedWriteBu
 	}
 	var r io.Reader = conn
 	if readBufferSize > 0 {
-		r = bufio.NewReaderSize(r, readBufferSize)
+		r = bufio.NewReaderSize(r, 32*1024)
 	}
 	var pool *sync.Pool
 	if sharedWriteBuffer {
