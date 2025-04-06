@@ -18,6 +18,7 @@ import (
 	"golang.org/x/net/http/httpguts"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
+	"google.golang.org/grpc/mem"
 )
 
 const frameHeaderLen = 9
@@ -144,7 +145,6 @@ var flagName = map[FrameType]map[Flags]string{
 type frameParser func(fc *frameCache, fh FrameHeader, countError func(string), payload []byte) (Frame, error)
 
 var frameParsers = map[FrameType]frameParser{
-	FrameData:         parseDataFrame,
 	FrameHeaders:      parseHeadersFrame,
 	FramePriority:     parsePriorityFrame,
 	FrameRSTStream:    parseRSTStreamFrame,
@@ -234,6 +234,13 @@ func (h *FrameHeader) checkValid() {
 }
 
 func (h *FrameHeader) invalidate() { h.valid = false }
+
+func (f *DataFrame) invalidate() {
+	f.FrameHeader.invalidate()
+	if f.data != nil {
+		f.data.Free()
+	}
+}
 
 // frame header bytes.
 // Used only by ReadFrameHeader.
@@ -525,11 +532,32 @@ func (fr *Framer) ReadFrame() (Frame, error) {
 	if fh.Length > fr.maxReadSize {
 		return nil, ErrFrameTooLarge
 	}
-	payload := fr.getReadBuf(fh.Length)
-	if _, err := io.ReadFull(fr.r, payload); err != nil {
-		return nil, err
+	var f Frame
+	if fh.Type == FrameData {
+		if mem.IsBelowBufferPoolingThreshold(int(fh.Length)) {
+			payload := make(mem.SliceBuffer, fh.Length)
+			if _, err := io.ReadFull(fr.r, payload); err != nil {
+				return nil, err
+			}
+			f, err = parseDataFrame(fr.frameCache, fh, fr.countError, payload)
+		} else {
+			payload := mem.DefaultBufferPool().Get(int(fh.Length))
+			if _, err := io.ReadFull(fr.r, *payload); err != nil {
+				mem.DefaultBufferPool().Put(payload)
+				return nil, err
+			}
+			f, err = parseDataFrame(fr.frameCache, fh, fr.countError, mem.NewBuffer(payload, mem.DefaultBufferPool()))
+			if err != nil {
+				mem.DefaultBufferPool().Put(payload)
+			}
+		}
+	} else {
+		payload := fr.getReadBuf(fh.Length)
+		if _, err := io.ReadFull(fr.r, payload); err != nil {
+			return nil, err
+		}
+		f, err = typeFrameParser(fh.Type)(fr.frameCache, fh, fr.countError, payload)
 	}
-	f, err := typeFrameParser(fh.Type)(fr.frameCache, fh, fr.countError, payload)
 	if err != nil {
 		if ce, ok := err.(connError); ok {
 			return nil, fr.connError(ce.Code, ce.Reason)
@@ -601,7 +629,7 @@ func (fr *Framer) checkFrameOrder(f Frame) error {
 // See https://httpwg.org/specs/rfc7540.html#rfc.section.6.1
 type DataFrame struct {
 	FrameHeader
-	data []byte
+	data mem.Buffer
 }
 
 func (f *DataFrame) StreamEnded() bool {
@@ -612,12 +640,12 @@ func (f *DataFrame) StreamEnded() bool {
 // size byte or padding suffix bytes.
 // The caller must not retain the returned memory past the next
 // call to ReadFrame.
-func (f *DataFrame) Data() []byte {
+func (f *DataFrame) Data() mem.Buffer {
 	f.checkValid()
 	return f.data
 }
 
-func parseDataFrame(fc *frameCache, fh FrameHeader, countError func(string), payload []byte) (Frame, error) {
+func parseDataFrame(fc *frameCache, fh FrameHeader, countError func(string), payload mem.Buffer) (Frame, error) {
 	if fh.StreamID == 0 {
 		// DATA frames MUST be associated with a stream. If a
 		// DATA frame is received whose stream identifier
@@ -625,6 +653,7 @@ func parseDataFrame(fc *frameCache, fh FrameHeader, countError func(string), pay
 		// connection error (Section 5.4.1) of type
 		// PROTOCOL_ERROR.
 		countError("frame_data_stream_0")
+		payload.Free()
 		return nil, connError{http2.ErrCodeProtocol, "DATA frame with stream ID 0"}
 	}
 	f := fc.getDataFrame()
@@ -633,21 +662,28 @@ func parseDataFrame(fc *frameCache, fh FrameHeader, countError func(string), pay
 	var padSize byte
 	if fh.Flags.Has(FlagDataPadded) {
 		var err error
-		payload, padSize, err = readByte(payload)
+		_, padSize, err = readByte(payload.ReadOnlyData())
 		if err != nil {
 			countError("frame_data_pad_byte_short")
+			payload.Free()
 			return nil, err
 		}
+		left, right := mem.SplitUnsafe(payload, 1)
+		left.Free()
+		payload = right
 	}
-	if int(padSize) > len(payload) {
+	if int(padSize) > payload.Len() {
 		// If the length of the padding is greater than the
 		// length of the frame payload, the recipient MUST
 		// treat this as a connection error.
 		// Filed: https://github.com/http2/http2-spec/issues/610
 		countError("frame_data_pad_too_big")
+		payload.Free()
 		return nil, connError{http2.ErrCodeProtocol, "pad size larger than data payload"}
 	}
-	f.data = payload[:len(payload)-int(padSize)]
+	payload, right := mem.SplitUnsafe(payload, payload.Len()-int(padSize))
+	right.Free()
+	f.data = payload
 	return f, nil
 }
 
@@ -1693,14 +1729,14 @@ func summarizeFrame(f Frame) string {
 			buf.Truncate(buf.Len() - 1) // remove trailing comma
 		}
 	case *DataFrame:
-		data := f.Data()
+		data := f.Data().ReadOnlyData()
 		const max = 256
 		if len(data) > max {
 			data = data[:max]
 		}
 		fmt.Fprintf(&buf, " data=%q", data)
-		if len(f.Data()) > max {
-			fmt.Fprintf(&buf, " (%d bytes omitted)", len(f.Data())-max)
+		if len(f.Data().ReadOnlyData()) > max {
+			fmt.Fprintf(&buf, " (%d bytes omitted)", len(f.Data().ReadOnlyData())-max)
 		}
 	case *WindowUpdateFrame:
 		if f.StreamID == 0 {

@@ -94,7 +94,7 @@ func TestWriteData(t *testing.T) {
 	if !ok {
 		t.Fatalf("got %T; want *DataFrame", f)
 	}
-	if !bytes.Equal(df.Data(), data) {
+	if !bytes.Equal(df.Data().ReadOnlyData(), data) {
 		t.Errorf("got %q; want %q", df.Data(), data)
 	}
 	if f.Header().Flags&1 == 0 {
@@ -167,7 +167,7 @@ func TestWriteDataPadded(t *testing.T) {
 			continue
 		}
 		df := f.(*DataFrame)
-		if !bytes.Equal(df.Data(), tt.data) {
+		if !bytes.Equal(df.Data().ReadOnlyData(), tt.data) {
 			t.Errorf("%d. got %q; want %q", i, df.Data(), tt.data)
 		}
 	}
@@ -1203,7 +1203,7 @@ func readAndVerifyDataFrame(data string, length byte, fr *Framer, buf *bytes.Buf
 	if !ok {
 		t.Fatalf("got %T; want *DataFrame", f)
 	}
-	if !bytes.Equal(df.Data(), []byte(data)) {
+	if !bytes.Equal(df.Data().ReadOnlyData(), []byte(data)) {
 		t.Errorf("got %q; want %q", df.Data(), []byte(data))
 	}
 	if f.Header().Flags&1 == 0 {
