@@ -46,6 +46,7 @@ import (
 	"google.golang.org/grpc/internal/grpctest"
 	"google.golang.org/grpc/internal/leakcheck"
 	"google.golang.org/grpc/internal/testutils"
+	grpchttp2 "google.golang.org/grpc/internal/transport/http2"
 	"google.golang.org/grpc/mem"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/resolver"
@@ -2611,13 +2612,13 @@ func (s) TestClientDecodeHeaderStatusErr(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		// input
-		metaHeaderFrame *http2.MetaHeadersFrame
+		metaHeaderFrame *grpchttp2.MetaHeadersFrame
 		// output
 		wantStatus *status.Status
 	}{
 		{
 			name: "valid header",
-			metaHeaderFrame: &http2.MetaHeadersFrame{
+			metaHeaderFrame: &grpchttp2.MetaHeadersFrame{
 				Fields: []hpack.HeaderField{
 					{Name: "content-type", Value: "application/grpc"},
 					{Name: "grpc-status", Value: "0"},
@@ -2629,7 +2630,7 @@ func (s) TestClientDecodeHeaderStatusErr(t *testing.T) {
 		},
 		{
 			name: "missing content-type header",
-			metaHeaderFrame: &http2.MetaHeadersFrame{
+			metaHeaderFrame: &grpchttp2.MetaHeadersFrame{
 				Fields: []hpack.HeaderField{
 					{Name: "grpc-status", Value: "0"},
 					{Name: ":status", Value: "200"},
@@ -2642,7 +2643,7 @@ func (s) TestClientDecodeHeaderStatusErr(t *testing.T) {
 		},
 		{
 			name: "invalid grpc status header field",
-			metaHeaderFrame: &http2.MetaHeadersFrame{
+			metaHeaderFrame: &grpchttp2.MetaHeadersFrame{
 				Fields: []hpack.HeaderField{
 					{Name: "content-type", Value: "application/grpc"},
 					{Name: "grpc-status", Value: "xxxx"},
@@ -2656,7 +2657,7 @@ func (s) TestClientDecodeHeaderStatusErr(t *testing.T) {
 		},
 		{
 			name: "invalid http content type",
-			metaHeaderFrame: &http2.MetaHeadersFrame{
+			metaHeaderFrame: &grpchttp2.MetaHeadersFrame{
 				Fields: []hpack.HeaderField{
 					{Name: "content-type", Value: "application/json"},
 				},
@@ -2668,7 +2669,7 @@ func (s) TestClientDecodeHeaderStatusErr(t *testing.T) {
 		},
 		{
 			name: "http fallback and invalid http status",
-			metaHeaderFrame: &http2.MetaHeadersFrame{
+			metaHeaderFrame: &grpchttp2.MetaHeadersFrame{
 				Fields: []hpack.HeaderField{
 					// No content type provided then fallback into handling http error.
 					{Name: ":status", Value: "xxxx"},
@@ -2681,7 +2682,7 @@ func (s) TestClientDecodeHeaderStatusErr(t *testing.T) {
 		},
 		{
 			name: "http2 frame size exceeds",
-			metaHeaderFrame: &http2.MetaHeadersFrame{
+			metaHeaderFrame: &grpchttp2.MetaHeadersFrame{
 				Fields:    nil,
 				Truncated: true,
 			},
@@ -2692,7 +2693,7 @@ func (s) TestClientDecodeHeaderStatusErr(t *testing.T) {
 		},
 		{
 			name: "bad status in grpc mode",
-			metaHeaderFrame: &http2.MetaHeadersFrame{
+			metaHeaderFrame: &grpchttp2.MetaHeadersFrame{
 				Fields: []hpack.HeaderField{
 					{Name: "content-type", Value: "application/grpc"},
 					{Name: "grpc-status", Value: "0"},
@@ -2706,7 +2707,7 @@ func (s) TestClientDecodeHeaderStatusErr(t *testing.T) {
 		},
 		{
 			name: "missing http status",
-			metaHeaderFrame: &http2.MetaHeadersFrame{
+			metaHeaderFrame: &grpchttp2.MetaHeadersFrame{
 				Fields: []hpack.HeaderField{
 					{Name: "content-type", Value: "application/grpc"},
 				},
@@ -2722,8 +2723,8 @@ func (s) TestClientDecodeHeaderStatusErr(t *testing.T) {
 			ts := testStream()
 			s := testClient(ts)
 
-			test.metaHeaderFrame.HeadersFrame = &http2.HeadersFrame{
-				FrameHeader: http2.FrameHeader{
+			test.metaHeaderFrame.HeadersFrame = &grpchttp2.HeadersFrame{
+				FrameHeader: grpchttp2.FrameHeader{
 					StreamID: 0,
 				},
 			}
@@ -2740,10 +2741,10 @@ func (s) TestClientDecodeHeaderStatusErr(t *testing.T) {
 			ts := testStream()
 			s := testClient(ts)
 
-			test.metaHeaderFrame.HeadersFrame = &http2.HeadersFrame{
-				FrameHeader: http2.FrameHeader{
+			test.metaHeaderFrame.HeadersFrame = &grpchttp2.HeadersFrame{
+				FrameHeader: grpchttp2.FrameHeader{
 					StreamID: 0,
-					Flags:    http2.FlagHeadersEndStream,
+					Flags:    grpchttp2.FlagHeadersEndStream,
 				},
 			}
 
