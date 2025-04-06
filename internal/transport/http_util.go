@@ -37,6 +37,7 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 	"google.golang.org/grpc/codes"
+	grpchttp2 "google.golang.org/grpc/internal/transport/http2"
 )
 
 const (
@@ -390,7 +391,7 @@ func toIOError(err error) error {
 
 type framer struct {
 	writer *bufWriter
-	fr     *http2.Framer
+	fr     *grpchttp2.Framer
 }
 
 var writeBufferPoolMap = make(map[int]*sync.Pool)
@@ -411,7 +412,7 @@ func newFramer(conn net.Conn, writeBufferSize, readBufferSize int, sharedWriteBu
 	w := newBufWriter(conn, writeBufferSize, pool)
 	f := &framer{
 		writer: w,
-		fr:     http2.NewFramer(w, r),
+		fr:     grpchttp2.NewFramer(w, r),
 	}
 	f.fr.SetMaxReadFrameSize(http2MaxFrameLen)
 	// Opt-in to Frame reuse API on framer to reduce garbage.

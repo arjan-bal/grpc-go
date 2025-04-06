@@ -32,6 +32,7 @@ import (
 	"golang.org/x/net/http2/hpack"
 	"google.golang.org/grpc/internal/grpclog"
 	"google.golang.org/grpc/internal/grpcutil"
+	grpchttp2 "google.golang.org/grpc/internal/transport/http2"
 	"google.golang.org/grpc/mem"
 	"google.golang.org/grpc/status"
 )
@@ -737,7 +738,7 @@ func (l *loopyWriter) writeHeader(streamID uint32, endStream bool, hf []hpack.He
 		}
 		if first {
 			first = false
-			err = l.framer.fr.WriteHeaders(http2.HeadersFrameParam{
+			err = l.framer.fr.WriteHeaders(grpchttp2.HeadersFrameParam{
 				StreamID:      streamID,
 				BlockFragment: l.hBuf.Next(size),
 				EndStream:     endStream,
