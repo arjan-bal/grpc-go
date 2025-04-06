@@ -46,6 +46,7 @@ import (
 	"google.golang.org/grpc/internal/proxyattributes"
 	istatus "google.golang.org/grpc/internal/status"
 	isyscall "google.golang.org/grpc/internal/syscall"
+	grpchttp2 "google.golang.org/grpc/internal/transport/http2"
 	"google.golang.org/grpc/internal/transport/networktype"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/mem"
@@ -1123,7 +1124,7 @@ func (t *http2Client) write(s *ClientStream, hdr []byte, data mem.BufferSlice, o
 	return nil
 }
 
-func (t *http2Client) getStream(f http2.Frame) *ClientStream {
+func (t *http2Client) getStream(f grpchttp2.Frame) *ClientStream {
 	t.mu.Lock()
 	s := t.activeStreams[f.Header().StreamID]
 	t.mu.Unlock()
@@ -1172,7 +1173,7 @@ func (t *http2Client) updateFlowControl(n uint32) {
 	})
 }
 
-func (t *http2Client) handleData(f *http2.DataFrame) {
+func (t *http2Client) handleData(f *grpchttp2.DataFrame) {
 	size := f.Header().Length
 	var sendBDPPing bool
 	if t.bdpEst != nil {
@@ -1216,7 +1217,7 @@ func (t *http2Client) handleData(f *http2.DataFrame) {
 			t.closeStream(s, io.EOF, true, http2.ErrCodeFlowControl, status.New(codes.Internal, err.Error()), nil, false)
 			return
 		}
-		if f.Header().Flags.Has(http2.FlagDataPadded) {
+		if f.Header().Flags.Has(grpchttp2.FlagDataPadded) {
 			if w := s.fc.onRead(size - uint32(len(f.Data()))); w > 0 {
 				t.controlBuf.put(&outgoingWindowUpdate{s.id, w})
 			}
@@ -1241,7 +1242,7 @@ func (t *http2Client) handleData(f *http2.DataFrame) {
 	}
 }
 
-func (t *http2Client) handleRSTStream(f *http2.RSTStreamFrame) {
+func (t *http2Client) handleRSTStream(f *grpchttp2.RSTStreamFrame) {
 	s := t.getStream(f)
 	if s == nil {
 		return
@@ -1268,7 +1269,7 @@ func (t *http2Client) handleRSTStream(f *http2.RSTStreamFrame) {
 	t.closeStream(s, st.Err(), false, http2.ErrCodeNo, st, nil, false)
 }
 
-func (t *http2Client) handleSettings(f *http2.SettingsFrame, isFirst bool) {
+func (t *http2Client) handleSettings(f *grpchttp2.SettingsFrame, isFirst bool) {
 	if f.IsAck() {
 		return
 	}
@@ -1317,7 +1318,7 @@ func (t *http2Client) handleSettings(f *http2.SettingsFrame, isFirst bool) {
 	}, sf)
 }
 
-func (t *http2Client) handlePing(f *http2.PingFrame) {
+func (t *http2Client) handlePing(f *grpchttp2.PingFrame) {
 	if f.IsAck() {
 		// Maybe it's a BDP ping.
 		if t.bdpEst != nil {
@@ -1330,7 +1331,7 @@ func (t *http2Client) handlePing(f *http2.PingFrame) {
 	t.controlBuf.put(pingAck)
 }
 
-func (t *http2Client) handleGoAway(f *http2.GoAwayFrame) error {
+func (t *http2Client) handleGoAway(f *grpchttp2.GoAwayFrame) error {
 	t.mu.Lock()
 	if t.state == closing {
 		t.mu.Unlock()
@@ -1411,7 +1412,7 @@ func (t *http2Client) handleGoAway(f *http2.GoAwayFrame) error {
 // on the GoAway frame received.
 // It expects a lock on transport's mutex to be held by
 // the caller.
-func (t *http2Client) setGoAwayReason(f *http2.GoAwayFrame) {
+func (t *http2Client) setGoAwayReason(f *grpchttp2.GoAwayFrame) {
 	t.goAwayReason = GoAwayNoReason
 	if f.ErrCode == http2.ErrCodeEnhanceYourCalm {
 		if string(f.DebugData()) == "too_many_pings" {
@@ -1431,7 +1432,7 @@ func (t *http2Client) GetGoAwayReason() (GoAwayReason, string) {
 	return t.goAwayReason, t.goAwayDebugMessage
 }
 
-func (t *http2Client) handleWindowUpdate(f *http2.WindowUpdateFrame) {
+func (t *http2Client) handleWindowUpdate(f *grpchttp2.WindowUpdateFrame) {
 	t.controlBuf.put(&incomingWindowUpdate{
 		streamID:  f.Header().StreamID,
 		increment: f.Increment,
@@ -1439,7 +1440,7 @@ func (t *http2Client) handleWindowUpdate(f *http2.WindowUpdateFrame) {
 }
 
 // operateHeaders takes action on the decoded headers.
-func (t *http2Client) operateHeaders(frame *http2.MetaHeadersFrame) {
+func (t *http2Client) operateHeaders(frame *grpchttp2.MetaHeadersFrame) {
 	s := t.getStream(frame)
 	if s == nil {
 		return
@@ -1627,7 +1628,7 @@ func (t *http2Client) readServerPreface() error {
 	if err != nil {
 		return connectionErrorf(true, err, "error reading server preface: %v", err)
 	}
-	sf, ok := frame.(*http2.SettingsFrame)
+	sf, ok := frame.(*grpchttp2.SettingsFrame)
 	if !ok {
 		return connectionErrorf(true, nil, "initial http2 frame from server is not a settings frame: %T", frame)
 	}
@@ -1690,19 +1691,19 @@ func (t *http2Client) reader(errCh chan<- error) {
 			return
 		}
 		switch frame := frame.(type) {
-		case *http2.MetaHeadersFrame:
+		case *grpchttp2.MetaHeadersFrame:
 			t.operateHeaders(frame)
-		case *http2.DataFrame:
+		case *grpchttp2.DataFrame:
 			t.handleData(frame)
-		case *http2.RSTStreamFrame:
+		case *grpchttp2.RSTStreamFrame:
 			t.handleRSTStream(frame)
-		case *http2.SettingsFrame:
+		case *grpchttp2.SettingsFrame:
 			t.handleSettings(frame, false)
-		case *http2.PingFrame:
+		case *grpchttp2.PingFrame:
 			t.handlePing(frame)
-		case *http2.GoAwayFrame:
+		case *grpchttp2.GoAwayFrame:
 			errClose = t.handleGoAway(frame)
-		case *http2.WindowUpdateFrame:
+		case *grpchttp2.WindowUpdateFrame:
 			t.handleWindowUpdate(frame)
 		default:
 			if logger.V(logLevel) {

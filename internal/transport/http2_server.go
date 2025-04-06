@@ -41,6 +41,7 @@ import (
 	"google.golang.org/grpc/internal/pretty"
 	istatus "google.golang.org/grpc/internal/status"
 	"google.golang.org/grpc/internal/syscall"
+	grpchttp2 "google.golang.org/grpc/internal/transport/http2"
 	"google.golang.org/grpc/mem"
 	"google.golang.org/protobuf/proto"
 
@@ -326,7 +327,7 @@ func NewServerTransport(conn net.Conn, config *ServerConfig) (_ ServerTransport,
 		return nil, connectionErrorf(false, err, "transport: http2Server.HandleStreams failed to read initial settings frame: %v", err)
 	}
 	atomic.StoreInt64(&t.lastRead, time.Now().UnixNano())
-	sf, ok := frame.(*http2.SettingsFrame)
+	sf, ok := frame.(*grpchttp2.SettingsFrame)
 	if !ok {
 		return nil, connectionErrorf(false, nil, "transport: http2Server.HandleStreams saw invalid preface type %T from client", frame)
 	}
@@ -361,7 +362,7 @@ func NewServerTransport(conn net.Conn, config *ServerConfig) (_ ServerTransport,
 
 // operateHeaders takes action on the decoded headers. Returns an error if fatal
 // error encountered and transport needs to close, otherwise returns nil.
-func (t *http2Server) operateHeaders(ctx context.Context, frame *http2.MetaHeadersFrame, handle func(*ServerStream)) error {
+func (t *http2Server) operateHeaders(ctx context.Context, frame *grpchttp2.MetaHeadersFrame, handle func(*ServerStream)) error {
 	// Acquire max stream ID lock for entire duration
 	t.maxStreamMu.Lock()
 	defer t.maxStreamMu.Unlock()
@@ -681,7 +682,7 @@ func (t *http2Server) HandleStreams(ctx context.Context, handle func(*ServerStre
 			return
 		}
 		switch frame := frame.(type) {
-		case *http2.MetaHeadersFrame:
+		case *grpchttp2.MetaHeadersFrame:
 			if err := t.operateHeaders(ctx, frame, handle); err != nil {
 				// Any error processing client headers, e.g. invalid stream ID,
 				// is considered a protocol violation.
@@ -692,17 +693,17 @@ func (t *http2Server) HandleStreams(ctx context.Context, handle func(*ServerStre
 				})
 				continue
 			}
-		case *http2.DataFrame:
+		case *grpchttp2.DataFrame:
 			t.handleData(frame)
-		case *http2.RSTStreamFrame:
+		case *grpchttp2.RSTStreamFrame:
 			t.handleRSTStream(frame)
-		case *http2.SettingsFrame:
+		case *grpchttp2.SettingsFrame:
 			t.handleSettings(frame)
-		case *http2.PingFrame:
+		case *grpchttp2.PingFrame:
 			t.handlePing(frame)
-		case *http2.WindowUpdateFrame:
+		case *grpchttp2.WindowUpdateFrame:
 			t.handleWindowUpdate(frame)
-		case *http2.GoAwayFrame:
+		case *grpchttp2.GoAwayFrame:
 			// TODO: Handle GoAway from the client appropriately.
 		default:
 			if t.logger.V(logLevel) {
@@ -712,7 +713,7 @@ func (t *http2Server) HandleStreams(ctx context.Context, handle func(*ServerStre
 	}
 }
 
-func (t *http2Server) getStream(f http2.Frame) (*ServerStream, bool) {
+func (t *http2Server) getStream(f grpchttp2.Frame) (*ServerStream, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.activeStreams == nil {
@@ -773,7 +774,7 @@ func (t *http2Server) updateFlowControl(n uint32) {
 
 }
 
-func (t *http2Server) handleData(f *http2.DataFrame) {
+func (t *http2Server) handleData(f *grpchttp2.DataFrame) {
 	size := f.Header().Length
 	var sendBDPPing bool
 	if t.bdpEst != nil {
@@ -818,7 +819,7 @@ func (t *http2Server) handleData(f *http2.DataFrame) {
 			t.closeStream(s, true, http2.ErrCodeFlowControl, false)
 			return
 		}
-		if f.Header().Flags.Has(http2.FlagDataPadded) {
+		if f.Header().Flags.Has(grpchttp2.FlagDataPadded) {
 			if w := s.fc.onRead(size - uint32(len(f.Data()))); w > 0 {
 				t.controlBuf.put(&outgoingWindowUpdate{s.id, w})
 			}
@@ -843,7 +844,7 @@ func (t *http2Server) handleData(f *http2.DataFrame) {
 	}
 }
 
-func (t *http2Server) handleRSTStream(f *http2.RSTStreamFrame) {
+func (t *http2Server) handleRSTStream(f *grpchttp2.RSTStreamFrame) {
 	// If the stream is not deleted from the transport's active streams map, then do a regular close stream.
 	if s, ok := t.getStream(f); ok {
 		t.closeStream(s, false, 0, false)
@@ -858,7 +859,7 @@ func (t *http2Server) handleRSTStream(f *http2.RSTStreamFrame) {
 	})
 }
 
-func (t *http2Server) handleSettings(f *http2.SettingsFrame) {
+func (t *http2Server) handleSettings(f *grpchttp2.SettingsFrame) {
 	if f.IsAck() {
 		return
 	}
@@ -891,7 +892,7 @@ const (
 	defaultPingTimeout = 2 * time.Hour
 )
 
-func (t *http2Server) handlePing(f *http2.PingFrame) {
+func (t *http2Server) handlePing(f *grpchttp2.PingFrame) {
 	if f.IsAck() {
 		if f.Data == goAwayPing.data && t.drainEvent != nil {
 			t.drainEvent.Fire()
@@ -940,7 +941,7 @@ func (t *http2Server) handlePing(f *http2.PingFrame) {
 	}
 }
 
-func (t *http2Server) handleWindowUpdate(f *http2.WindowUpdateFrame) {
+func (t *http2Server) handleWindowUpdate(f *grpchttp2.WindowUpdateFrame) {
 	t.controlBuf.put(&incomingWindowUpdate{
 		streamID:  f.Header().StreamID,
 		increment: f.Increment,
