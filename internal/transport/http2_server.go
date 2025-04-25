@@ -80,6 +80,7 @@ type http2Server struct {
 	peer            peer.Peer
 	inTapHandle     tap.ServerInHandle
 	framer          *framer
+	bufferAllocator bufferAllocator
 	// The max number of concurrent streams.
 	maxStreams uint32
 	// controlBuf delivers all the control related tasks (e.g., window
@@ -252,6 +253,7 @@ func NewServerTransport(conn net.Conn, config *ServerConfig) (_ ServerTransport,
 		conn:              conn,
 		peer:              peer,
 		framer:            framer,
+		bufferAllocator:   newAllocator(config.BufferPool),
 		readerDone:        make(chan struct{}),
 		loopyWriterDone:   make(chan struct{}),
 		maxStreams:        config.MaxStreams,
@@ -266,6 +268,7 @@ func NewServerTransport(conn net.Conn, config *ServerConfig) (_ ServerTransport,
 		initialWindowSize: iwz,
 		bufferPool:        config.BufferPool,
 	}
+	t.framer.fr.SetBufferAllocator(&t.bufferAllocator)
 	var czSecurity credentials.ChannelzSecurityValue
 	if au, ok := authInfo.(credentials.ChannelzSecurityInfo); ok {
 		czSecurity = au.GetSecurityValue()
@@ -818,22 +821,29 @@ func (t *http2Server) handleData(f *grpchttp2.DataFrame) {
 			t.closeStream(s, true, http2.ErrCodeFlowControl, false)
 			return
 		}
+		data := f.Data()
 		if f.Header().Flags.Has(grpchttp2.FlagDataPadded) {
-			if w := s.fc.onRead(size - uint32(len(f.Data()))); w > 0 {
+			if w := s.fc.onRead(size - uint32(len(data))); w > 0 {
 				t.controlBuf.put(&outgoingWindowUpdate{s.id, w})
 			}
 		}
 		// TODO(bradfitz, zhaoq): A copy is required here because there is no
 		// guarantee f.Data() is consumed before the arrival of next frame.
 		// Can this copy be eliminated?
-		if len(f.Data()) > 0 {
-			pool := t.bufferPool
-			if pool == nil {
-				// Note that this is only supposed to be nil in tests. Otherwise, stream is
-				// always initialized with a BufferPool.
-				pool = mem.DefaultBufferPool()
+		if len(data) > 0 {
+			buf := mem.NewBuffer(t.bufferAllocator.curBuf, t.bufferPool)
+			if f.Header().Flags.Has(grpchttp2.FlagDataPadded) {
+				left, right := mem.SplitUnsafe(buf, 1)
+				left.Free()
+				buf = right
 			}
-			s.write(recvMsg{buffer: mem.Copy(f.Data(), pool)})
+			blen := buf.Len()
+			if len(data) < blen {
+				left, right := mem.SplitUnsafe(buf, len(data))
+				right.Free()
+				buf = left
+			}
+			s.write(recvMsg{buffer: buf})
 		}
 	}
 	if f.StreamEnded() {

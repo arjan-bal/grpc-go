@@ -157,10 +157,9 @@ type http2Client struct {
 }
 
 type bufferAllocator struct {
-	curBuf           *[]byte
-	nonPoolBuf       []byte
-	bufferPool       mem.BufferPool
-	bufferObjectPool *sync.Pool
+	curBuf     *[]byte
+	nonPoolBuf []byte
+	bufferPool mem.BufferPool
 }
 
 func newAllocator(pool mem.BufferPool) bufferAllocator {
@@ -170,8 +169,7 @@ func newAllocator(pool mem.BufferPool) bufferAllocator {
 		pool = mem.DefaultBufferPool()
 	}
 	return bufferAllocator{
-		bufferPool:       pool,
-		bufferObjectPool: &sync.Pool{New: func() any { return new(wrappedBuf) }},
+		bufferPool: pool,
 	}
 }
 
@@ -185,16 +183,6 @@ func (b *bufferAllocator) Get(size uint32, typ grpchttp2.FrameType) []byte {
 	}
 	b.curBuf = b.bufferPool.Get(int(size))
 	return *b.curBuf
-}
-
-func (b *bufferAllocator) takeOwnership(view []byte) mem.Buffer {
-	ret := b.bufferObjectPool.Get().(*wrappedBuf)
-	ret.originalBuffer = mem.NewBuffer(b.curBuf, b.bufferPool)
-	ret.Buffer = mem.SliceBuffer(view)
-	if ret.pool == nil {
-		ret.pool = b.bufferObjectPool
-	}
-	return ret
 }
 
 func dial(ctx context.Context, fn func(context.Context, string) (net.Conn, error), addr resolver.Address, grpcUA string) (net.Conn, error) {
@@ -1249,7 +1237,20 @@ func (t *http2Client) handleData(f *grpchttp2.DataFrame) {
 		// guarantee f.Data() is consumed before the arrival of next frame.
 		// Can this copy be eliminated?
 		if len(data) > 0 {
-			s.write(recvMsg{buffer: t.bufferAllocator.takeOwnership(data)})
+			buf := mem.NewBuffer(t.bufferAllocator.curBuf, t.bufferPool)
+			if f.Header().Flags.Has(grpchttp2.FlagDataPadded) {
+				left, right := mem.SplitUnsafe(buf, 1)
+				left.Free()
+				buf = right
+			}
+			blen := buf.Len()
+			if len(data) < blen {
+				left, right := mem.SplitUnsafe(buf, len(data))
+				right.Free()
+				buf = left
+			}
+
+			s.write(recvMsg{buffer: buf})
 		}
 	}
 	// The server has closed the stream without sending trailers.  Record that
@@ -1257,21 +1258,6 @@ func (t *http2Client) handleData(f *grpchttp2.DataFrame) {
 	if f.StreamEnded() {
 		t.closeStream(s, io.EOF, false, http2.ErrCodeNo, status.New(codes.Internal, "server closed the stream without sending trailers"), nil, true)
 	}
-}
-
-type wrappedBuf struct {
-	mem.Buffer
-	originalBuffer mem.Buffer
-	pool           *sync.Pool
-}
-
-func (w *wrappedBuf) Free() {
-	w.originalBuffer.Free()
-	w.pool.Put(w)
-}
-
-func (w *wrappedBuf) Ref() {
-	w.originalBuffer.Ref()
 }
 
 func (t *http2Client) handleRSTStream(f *grpchttp2.RSTStreamFrame) {
