@@ -176,31 +176,15 @@ func newAllocator(pool mem.BufferPool) bufferAllocator {
 }
 
 func (b *bufferAllocator) Get(size uint32, typ grpchttp2.FrameType) []byte {
-	if typ != grpchttp2.FrameData {
-		if cap(b.nonPoolBuf) >= int(size) {
-			return b.nonPoolBuf[:size]
-		}
-		b.nonPoolBuf = make([]byte, size)
-		return b.nonPoolBuf
+	if cap(b.nonPoolBuf) >= int(size) {
+		return b.nonPoolBuf[:size]
 	}
-	buf := b.curBuf
-	if buf != nil {
-		if cap(*buf) >= int(size) {
-			return (*buf)[:size]
-		}
-		b.bufferPool.Put(buf)
-	}
-	b.curBuf = b.bufferPool.Get(int(size))
-	return *b.curBuf
+	b.nonPoolBuf = make([]byte, size)
+	return b.nonPoolBuf
 }
 
-func (b *bufferAllocator) takeOwnership() *wrappedBuf {
-	ret := mem.NewBuffer(b.curBuf, b.bufferPool)
-	b.curBuf = nil
-	wrappedBuf := b.bufferObjectPool.Get().(*wrappedBuf)
-	wrappedBuf.originalBuffer = ret
-	wrappedBuf.pool = b.bufferObjectPool
-	return wrappedBuf
+func (b *bufferAllocator) takeOwnership() []byte {
+	return b.nonPoolBuf
 }
 
 func dial(ctx context.Context, fn func(context.Context, string) (net.Conn, error), addr resolver.Address, grpcUA string) (net.Conn, error) {
@@ -1255,9 +1239,7 @@ func (t *http2Client) handleData(f *grpchttp2.DataFrame) {
 		// guarantee f.Data() is consumed before the arrival of next frame.
 		// Can this copy be eliminated?
 		if len(data) > 0 {
-			wb := t.bufferAllocator.takeOwnership()
-			wb.Buffer = mem.SliceBuffer(data)
-			s.write(recvMsg{buffer: wb})
+			s.write(recvMsg{buffer: mem.Copy(data, t.bufferPool)})
 		}
 	}
 	// The server has closed the stream without sending trailers.  Record that
