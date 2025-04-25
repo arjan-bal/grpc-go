@@ -88,9 +88,10 @@ type http2Client struct {
 	writerDone chan struct{} // sync point to enable testing.
 	// goAway is closed to notify the upper layer (i.e., addrConn.transportMonitor)
 	// that the server sent GoAway on this transport.
-	goAway        chan struct{}
-	keepaliveDone chan struct{} // Closed when the keepalive goroutine exits.
-	framer        *framer
+	goAway          chan struct{}
+	keepaliveDone   chan struct{} // Closed when the keepalive goroutine exits.
+	framer          *framer
+	bufferAllocator bufferAllocator
 	// controlBuf delivers all the control related tasks (e.g., window
 	// updates, reset streams, and various settings) to the controller.
 	// Do not access controlBuf with mu held.
@@ -153,6 +154,53 @@ type http2Client struct {
 
 	connectionID uint64
 	logger       *grpclog.PrefixLogger
+}
+
+type bufferAllocator struct {
+	curBuf           *[]byte
+	nonPoolBuf       []byte
+	bufferPool       mem.BufferPool
+	bufferObjectPool *sync.Pool
+}
+
+func newAllocator(pool mem.BufferPool) bufferAllocator {
+	if pool == nil {
+		// Note that this is only supposed to be nil in tests. Otherwise, stream is
+		// always initialized with a BufferPool.
+		pool = mem.DefaultBufferPool()
+	}
+	return bufferAllocator{
+		bufferPool:       pool,
+		bufferObjectPool: &sync.Pool{New: func() any { return new(wrappedBuf) }},
+	}
+}
+
+func (b *bufferAllocator) Get(size uint32, typ grpchttp2.FrameType) []byte {
+	if typ != grpchttp2.FrameData {
+		if cap(b.nonPoolBuf) >= int(size) {
+			return b.nonPoolBuf[:size]
+		}
+		b.nonPoolBuf = make([]byte, size)
+		return b.nonPoolBuf
+	}
+	buf := b.curBuf
+	if buf != nil {
+		if cap(*buf) >= int(size) {
+			return (*buf)[:size]
+		}
+		b.bufferPool.Put(buf)
+	}
+	b.curBuf = b.bufferPool.Get(int(size))
+	return *b.curBuf
+}
+
+func (b *bufferAllocator) takeOwnership() *wrappedBuf {
+	ret := mem.NewBuffer(b.curBuf, b.bufferPool)
+	b.curBuf = nil
+	wrappedBuf := b.bufferObjectPool.Get().(*wrappedBuf)
+	wrappedBuf.originalBuffer = ret
+	wrappedBuf.pool = b.bufferObjectPool
+	return wrappedBuf
 }
 
 func dial(ctx context.Context, fn func(context.Context, string) (net.Conn, error), addr resolver.Address, grpcUA string) (net.Conn, error) {
@@ -339,6 +387,7 @@ func NewHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 		goAway:                make(chan struct{}),
 		keepaliveDone:         make(chan struct{}),
 		framer:                newFramer(conn, writeBufSize, readBufSize, opts.SharedWriteBuffer, maxHeaderListSize),
+		bufferAllocator:       newAllocator(opts.BufferPool),
 		fc:                    &trInFlow{limit: uint32(icwz)},
 		scheme:                scheme,
 		activeStreams:         make(map[uint32]*ClientStream),
@@ -355,6 +404,7 @@ func NewHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 		bufferPool:            opts.BufferPool,
 		onClose:               onClose,
 	}
+	t.framer.fr.SetBufferAllocator(&t.bufferAllocator)
 	var czSecurity credentials.ChannelzSecurityValue
 	if au, ok := authInfo.(credentials.ChannelzSecurityInfo); ok {
 		czSecurity = au.GetSecurityValue()
@@ -1195,22 +1245,19 @@ func (t *http2Client) handleData(f *grpchttp2.DataFrame) {
 			t.closeStream(s, io.EOF, true, http2.ErrCodeFlowControl, status.New(codes.Internal, err.Error()), nil, false)
 			return
 		}
+		data := f.Data()
 		if f.Header().Flags.Has(grpchttp2.FlagDataPadded) {
-			if w := s.fc.onRead(size - uint32(len(f.Data()))); w > 0 {
+			if w := s.fc.onRead(size - uint32(len(data))); w > 0 {
 				t.controlBuf.put(&outgoingWindowUpdate{s.id, w})
 			}
 		}
 		// TODO(bradfitz, zhaoq): A copy is required here because there is no
 		// guarantee f.Data() is consumed before the arrival of next frame.
 		// Can this copy be eliminated?
-		if len(f.Data()) > 0 {
-			pool := t.bufferPool
-			if pool == nil {
-				// Note that this is only supposed to be nil in tests. Otherwise, stream is
-				// always initialized with a BufferPool.
-				pool = mem.DefaultBufferPool()
-			}
-			s.write(recvMsg{buffer: mem.Copy(f.Data(), pool)})
+		if len(data) > 0 {
+			wb := t.bufferAllocator.takeOwnership()
+			wb.Buffer = mem.SliceBuffer(data)
+			s.write(recvMsg{buffer: wb})
 		}
 	}
 	// The server has closed the stream without sending trailers.  Record that
@@ -1218,6 +1265,21 @@ func (t *http2Client) handleData(f *grpchttp2.DataFrame) {
 	if f.StreamEnded() {
 		t.closeStream(s, io.EOF, false, http2.ErrCodeNo, status.New(codes.Internal, "server closed the stream without sending trailers"), nil, true)
 	}
+}
+
+type wrappedBuf struct {
+	mem.Buffer
+	originalBuffer mem.Buffer
+	pool           *sync.Pool
+}
+
+func (w *wrappedBuf) Free() {
+	w.originalBuffer.Free()
+	w.pool.Put(w)
+}
+
+func (w *wrappedBuf) Ref() {
+	w.originalBuffer.Ref()
 }
 
 func (t *http2Client) handleRSTStream(f *grpchttp2.RSTStreamFrame) {
