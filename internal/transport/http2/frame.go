@@ -24,10 +24,6 @@ const frameHeaderLen = 9
 
 var padZeros = make([]byte, 255) // zeros for padding
 
-type Allocator interface {
-	Get(size uint32, fType FrameType) []byte
-}
-
 // A FrameType is a registered frame type as defined in
 // https://httpwg.org/specs/rfc7540.html#rfc.section.11.2
 type FrameType uint8
@@ -305,7 +301,7 @@ type Framer struct {
 	// TODO: let allocator be configurable, and use a less memory-pinning
 	// allocator in server.go to minimize memory pinned for many idle conns.
 	// Will probably also need to make frame invalidation have a hook too.
-	allocator Allocator
+	allocator func(size uint32, fType FrameType) []byte
 	readBuf   []byte // cache for default getReadBuf
 
 	maxWriteSize uint32 // zero means unlimited; TODO: implement
@@ -355,9 +351,9 @@ type Framer struct {
 	frameCache *frameCache // nil if frames aren't reused (default)
 }
 
-// SetBufferAllocator sets a custom buffer allocator that will be called when a
-// new buffer slice is needed.
-func (fr *Framer) SetBufferAllocator(allocator Allocator) {
+// SetBufferAllocator sets a custom buffer allocator that will be called for
+// getting a buffer slice for each frame payload.
+func (fr *Framer) SetBufferAllocator(allocator func(uint32, FrameType) []byte) {
 	fr.allocator = allocator
 }
 
@@ -455,18 +451,6 @@ func (fc *frameCache) getDataFrame() *DataFrame {
 	return &fc.dataFrame
 }
 
-type defaultAllocator struct {
-	readBuf []byte
-}
-
-func (d *defaultAllocator) Get(size uint32, _ FrameType) []byte {
-	if cap(d.readBuf) >= int(size) {
-		return d.readBuf[:size]
-	}
-	d.readBuf = make([]byte, size)
-	return d.readBuf
-}
-
 // NewFramer returns a Framer that writes frames to w and reads them from r.
 func NewFramer(w io.Writer, r io.Reader) *Framer {
 	fr := &Framer{
@@ -479,7 +463,14 @@ func NewFramer(w io.Writer, r io.Reader) *Framer {
 		debugReadLoggerf:  log.Printf,
 		debugWriteLoggerf: log.Printf,
 	}
-	fr.allocator = &defaultAllocator{}
+	fr.allocator = func(size uint32, _ FrameType) []byte {
+		if cap(fr.readBuf) >= int(size) {
+			return fr.readBuf[:size]
+		}
+		fr.readBuf = make([]byte, size)
+		return fr.readBuf
+	}
+
 	fr.SetMaxReadFrameSize(maxFrameSize)
 	return fr
 }
@@ -541,7 +532,7 @@ func (fr *Framer) ReadFrame() (Frame, error) {
 	if fh.Length > fr.maxReadSize {
 		return nil, ErrFrameTooLarge
 	}
-	payload := fr.allocator.Get(fh.Length, fh.Type)
+	payload := fr.allocator(fh.Length, fh.Type)
 	if _, err := io.ReadFull(fr.r, payload); err != nil {
 		return nil, err
 	}

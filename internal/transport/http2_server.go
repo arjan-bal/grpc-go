@@ -268,7 +268,7 @@ func NewServerTransport(conn net.Conn, config *ServerConfig) (_ ServerTransport,
 		initialWindowSize: iwz,
 		bufferPool:        config.BufferPool,
 	}
-	t.framer.fr.SetBufferAllocator(&t.bufferAllocator)
+	t.framer.fr.SetBufferAllocator(t.bufferAllocator.get)
 	var czSecurity credentials.ChannelzSecurityValue
 	if au, ok := authInfo.(credentials.ChannelzSecurityInfo); ok {
 		czSecurity = au.GetSecurityValue()

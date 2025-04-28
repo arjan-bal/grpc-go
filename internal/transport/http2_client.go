@@ -173,7 +173,8 @@ func newAllocator(pool mem.BufferPool) bufferAllocator {
 	}
 }
 
-func (b *bufferAllocator) Get(size uint32, typ grpchttp2.FrameType) []byte {
+func (b *bufferAllocator) get(size uint32, typ grpchttp2.FrameType) []byte {
+	// Reuse buffer for non-data frames.
 	if typ != grpchttp2.FrameData {
 		if cap(b.nonPoolBuf) >= int(size) {
 			return b.nonPoolBuf[:size]
@@ -386,7 +387,7 @@ func NewHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 		bufferPool:            opts.BufferPool,
 		onClose:               onClose,
 	}
-	t.framer.fr.SetBufferAllocator(&t.bufferAllocator)
+	t.framer.fr.SetBufferAllocator(t.bufferAllocator.get)
 	var czSecurity credentials.ChannelzSecurityValue
 	if au, ok := authInfo.(credentials.ChannelzSecurityInfo); ok {
 		czSecurity = au.GetSecurityValue()
