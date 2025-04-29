@@ -832,8 +832,9 @@ func (t *http2Server) handleData(f *grpchttp2.DataFrame) {
 		// Can this copy be eliminated?
 		if len(data) > 0 {
 			buf := mem.NewBuffer(t.bufferAllocator.curBuf, t.bufferPool)
-			if f.Header().Flags.Has(grpchttp2.FlagDataPadded) {
-				left, right := mem.SplitUnsafe(buf, 1)
+			offset := subSliceOffset(*t.bufferAllocator.curBuf, data)
+			if offset > 0 {
+				left, right := mem.SplitUnsafe(buf, offset)
 				left.Free()
 				buf = right
 			}

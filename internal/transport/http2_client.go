@@ -31,6 +31,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -1239,8 +1240,9 @@ func (t *http2Client) handleData(f *grpchttp2.DataFrame) {
 		// Can this copy be eliminated?
 		if len(data) > 0 {
 			buf := mem.NewBuffer(t.bufferAllocator.curBuf, t.bufferPool)
-			if f.Header().Flags.Has(grpchttp2.FlagDataPadded) {
-				left, right := mem.SplitUnsafe(buf, 1)
+			offset := subSliceOffset(*t.bufferAllocator.curBuf, data)
+			if offset > 0 {
+				left, right := mem.SplitUnsafe(buf, offset)
 				left.Free()
 				buf = right
 			}
@@ -1259,6 +1261,13 @@ func (t *http2Client) handleData(f *grpchttp2.DataFrame) {
 	if f.StreamEnded() {
 		t.closeStream(s, io.EOF, false, http2.ErrCodeNo, status.New(codes.Internal, "server closed the stream without sending trailers"), nil, true)
 	}
+}
+
+func subSliceOffset(full, sub []byte) int {
+	fullPtr := unsafe.Pointer(&full[0])
+	subPtr := unsafe.Pointer(&sub[0])
+	size := unsafe.Sizeof(full[0])
+	return int(uintptr(subPtr)-uintptr(fullPtr)) / int(size)
 }
 
 func (t *http2Client) handleRSTStream(f *grpchttp2.RSTStreamFrame) {
