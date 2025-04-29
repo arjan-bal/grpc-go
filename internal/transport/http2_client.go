@@ -173,17 +173,22 @@ func newAllocator(pool mem.BufferPool) bufferAllocator {
 	}
 }
 
-func (b *bufferAllocator) get(size uint32, typ grpchttp2.FrameType) []byte {
-	// Reuse buffer for non-data frames.
-	if typ != grpchttp2.FrameData {
-		if cap(b.nonPoolBuf) >= int(size) {
-			return b.nonPoolBuf[:size]
-		}
-		b.nonPoolBuf = make([]byte, size)
-		return b.nonPoolBuf
+func (b *bufferAllocator) get(size uint32) []byte {
+	if b.curBuf != nil && cap(*b.curBuf) >= int(size) {
+		return (*b.curBuf)[:int(size)]
+	}
+	if b.curBuf != nil {
+		b.bufferPool.Put(b.curBuf)
 	}
 	b.curBuf = b.bufferPool.Get(int(size))
 	return *b.curBuf
+}
+
+func (b *bufferAllocator) freeBuf() {
+	if b.curBuf == nil {
+		return
+	}
+	b.bufferPool.Put(b.curBuf)
 }
 
 func dial(ctx context.Context, fn func(context.Context, string) (net.Conn, error), addr resolver.Address, grpcUA string) (net.Conn, error) {

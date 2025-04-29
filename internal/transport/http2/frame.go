@@ -300,7 +300,7 @@ type Framer struct {
 	// TODO: let allocator be configurable, and use a less memory-pinning
 	// allocator in server.go to minimize memory pinned for many idle conns.
 	// Will probably also need to make frame invalidation have a hook too.
-	allocator func(size uint32, fType FrameType) []byte
+	allocator func(size uint32) []byte
 	readBuf   []byte // cache for default getReadBuf
 
 	maxWriteSize uint32 // zero means unlimited; TODO: implement
@@ -352,7 +352,7 @@ type Framer struct {
 
 // SetBufferAllocator sets a custom buffer allocator that will be called for
 // getting a buffer slice for each frame payload.
-func (fr *Framer) SetBufferAllocator(allocator func(uint32, FrameType) []byte) {
+func (fr *Framer) SetBufferAllocator(allocator func(uint32) []byte) {
 	fr.allocator = allocator
 }
 
@@ -462,7 +462,7 @@ func NewFramer(w io.Writer, r io.Reader) *Framer {
 		debugReadLoggerf:  log.Printf,
 		debugWriteLoggerf: log.Printf,
 	}
-	fr.allocator = func(size uint32, _ FrameType) []byte {
+	fr.allocator = func(size uint32) []byte {
 		if cap(fr.readBuf) >= int(size) {
 			return fr.readBuf[:size]
 		}
@@ -547,16 +547,16 @@ func (fr *Framer) ReadFrame() (Frame, error) {
 				return nil, err
 			}
 			padSize = b[0]
-			payload = fr.allocator(fh.Length-1, fh.Type)
+			payload = fr.allocator(fh.Length - 1)
 		} else {
-			payload = fr.allocator(fh.Length, fh.Type)
+			payload = fr.allocator(fh.Length)
 		}
 		if _, err := io.ReadFull(fr.r, payload); err != nil {
 			return nil, err
 		}
 		f, err = parseDataFrame(fr.frameCache, fh, fr.countError, payload, padSize)
 	} else {
-		payload := fr.allocator(fh.Length, fh.Type)
+		payload := fr.allocator(fh.Length)
 		if _, err := io.ReadFull(fr.r, payload); err != nil {
 			return nil, err
 		}
