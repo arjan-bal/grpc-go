@@ -322,6 +322,9 @@ func NewServerTransport(conn net.Conn, config *ServerConfig) (_ ServerTransport,
 	}
 
 	frame, err := t.framer.fr.ReadFrame()
+	if err != nil {
+		t.bufferAllocator.freeBuf()
+	}
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
 		return nil, err
 	}
@@ -661,6 +664,7 @@ func (t *http2Server) HandleStreams(ctx context.Context, handle func(*ServerStre
 		frame, err := t.framer.fr.ReadFrame()
 		atomic.StoreInt64(&t.lastRead, time.Now().UnixNano())
 		if err != nil {
+			t.bufferAllocator.freeBuf()
 			if se, ok := err.(http2.StreamError); ok {
 				if t.logger.V(logLevel) {
 					t.logger.Warningf("Encountered http2.StreamError: %v", se)
@@ -831,20 +835,8 @@ func (t *http2Server) handleData(f *grpchttp2.DataFrame) {
 		// guarantee f.Data() is consumed before the arrival of next frame.
 		// Can this copy be eliminated?
 		if len(data) > 0 {
-			buf := mem.NewBuffer(t.bufferAllocator.curBuf, t.bufferPool)
-			offset := subSliceOffset(*t.bufferAllocator.curBuf, data)
-			if offset > 0 {
-				left, right := mem.SplitUnsafe(buf, offset)
-				left.Free()
-				buf = right
-			}
-			blen := buf.Len()
-			if len(data) < blen {
-				left, right := mem.SplitUnsafe(buf, len(data))
-				right.Free()
-				buf = left
-			}
-			s.write(recvMsg{buffer: buf})
+			t.bufferAllocator.curBuf = nil
+			s.write(recvMsg{buffer: mem.NewBuffer(&data, t.bufferPool)})
 		}
 	}
 	if f.StreamEnded() {

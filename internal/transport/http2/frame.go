@@ -144,7 +144,6 @@ var flagName = map[FrameType]map[Flags]string{
 type frameParser func(fc *frameCache, fh FrameHeader, countError func(string), payload []byte) (Frame, error)
 
 var frameParsers = map[FrameType]frameParser{
-	FrameData:         parseDataFrame,
 	FrameHeaders:      parseHeadersFrame,
 	FramePriority:     parsePriorityFrame,
 	FrameRSTStream:    parseRSTStreamFrame,
@@ -532,11 +531,37 @@ func (fr *Framer) ReadFrame() (Frame, error) {
 	if fh.Length > fr.maxReadSize {
 		return nil, ErrFrameTooLarge
 	}
-	payload := fr.allocator(fh.Length, fh.Type)
-	if _, err := io.ReadFull(fr.r, payload); err != nil {
-		return nil, err
+	var f Frame
+	// Optimization for aligning data frame's data to the beginning of the
+	// payload slice.
+	if fh.Type == FrameData {
+		padSize := byte(0)
+		var payload []byte
+		if fh.Flags.Has(FlagDataPadded) {
+			if fh.Length == 0 {
+				fr.countError("frame_data_pad_byte_short")
+				return nil, io.ErrUnexpectedEOF
+			}
+			b := [1]byte{0}
+			if _, err := io.ReadFull(fr.r, b[:]); err != nil {
+				return nil, err
+			}
+			padSize = b[0]
+			payload = fr.allocator(fh.Length-1, fh.Type)
+		} else {
+			payload = fr.allocator(fh.Length, fh.Type)
+		}
+		if _, err := io.ReadFull(fr.r, payload); err != nil {
+			return nil, err
+		}
+		f, err = parseDataFrame(fr.frameCache, fh, fr.countError, payload, padSize)
+	} else {
+		payload := fr.allocator(fh.Length, fh.Type)
+		if _, err := io.ReadFull(fr.r, payload); err != nil {
+			return nil, err
+		}
+		f, err = typeFrameParser(fh.Type)(fr.frameCache, fh, fr.countError, payload)
 	}
-	f, err := typeFrameParser(fh.Type)(fr.frameCache, fh, fr.countError, payload)
 	if err != nil {
 		if ce, ok := err.(connError); ok {
 			return nil, fr.connError(ce.Code, ce.Reason)
@@ -624,7 +649,7 @@ func (f *DataFrame) Data() []byte {
 	return f.data
 }
 
-func parseDataFrame(fc *frameCache, fh FrameHeader, countError func(string), payload []byte) (Frame, error) {
+func parseDataFrame(fc *frameCache, fh FrameHeader, countError func(string), payload []byte, padSize byte) (Frame, error) {
 	if fh.StreamID == 0 {
 		// DATA frames MUST be associated with a stream. If a
 		// DATA frame is received whose stream identifier
@@ -637,15 +662,6 @@ func parseDataFrame(fc *frameCache, fh FrameHeader, countError func(string), pay
 	f := fc.getDataFrame()
 	f.FrameHeader = fh
 
-	var padSize byte
-	if fh.Flags.Has(FlagDataPadded) {
-		var err error
-		payload, padSize, err = readByte(payload)
-		if err != nil {
-			countError("frame_data_pad_byte_short")
-			return nil, err
-		}
-	}
 	if int(padSize) > len(payload) {
 		// If the length of the padding is greater than the
 		// length of the frame payload, the recipient MUST

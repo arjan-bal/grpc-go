@@ -31,7 +31,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -1239,21 +1238,8 @@ func (t *http2Client) handleData(f *grpchttp2.DataFrame) {
 		// guarantee f.Data() is consumed before the arrival of next frame.
 		// Can this copy be eliminated?
 		if len(data) > 0 {
-			buf := mem.NewBuffer(t.bufferAllocator.curBuf, t.bufferPool)
-			offset := subSliceOffset(*t.bufferAllocator.curBuf, data)
-			if offset > 0 {
-				left, right := mem.SplitUnsafe(buf, offset)
-				left.Free()
-				buf = right
-			}
-			blen := buf.Len()
-			if len(data) < blen {
-				left, right := mem.SplitUnsafe(buf, len(data))
-				right.Free()
-				buf = left
-			}
-
-			s.write(recvMsg{buffer: buf})
+			t.bufferAllocator.curBuf = nil
+			s.write(recvMsg{buffer: mem.NewBuffer(&data, t.bufferPool)})
 		}
 	}
 	// The server has closed the stream without sending trailers.  Record that
@@ -1261,13 +1247,6 @@ func (t *http2Client) handleData(f *grpchttp2.DataFrame) {
 	if f.StreamEnded() {
 		t.closeStream(s, io.EOF, false, http2.ErrCodeNo, status.New(codes.Internal, "server closed the stream without sending trailers"), nil, true)
 	}
-}
-
-func subSliceOffset(full, sub []byte) int {
-	fullPtr := unsafe.Pointer(&full[0])
-	subPtr := unsafe.Pointer(&sub[0])
-	size := unsafe.Sizeof(full[0])
-	return int(uintptr(subPtr)-uintptr(fullPtr)) / int(size)
 }
 
 func (t *http2Client) handleRSTStream(f *grpchttp2.RSTStreamFrame) {
@@ -1653,6 +1632,7 @@ func (t *http2Client) operateHeaders(frame *grpchttp2.MetaHeadersFrame) {
 func (t *http2Client) readServerPreface() error {
 	frame, err := t.framer.fr.ReadFrame()
 	if err != nil {
+		t.bufferAllocator.freeBuf()
 		return connectionErrorf(true, err, "error reading server preface: %v", err)
 	}
 	sf, ok := frame.(*grpchttp2.SettingsFrame)
@@ -1692,6 +1672,7 @@ func (t *http2Client) reader(errCh chan<- error) {
 			atomic.StoreInt64(&t.lastRead, time.Now().UnixNano())
 		}
 		if err != nil {
+			t.bufferAllocator.freeBuf()
 			// Abort an active stream if the http2.Framer returns a
 			// http2.StreamError. This can happen only if the server's response
 			// is malformed http2.

@@ -77,7 +77,7 @@ func SetTrackingBufferPool(logger Logger) {
 	newPool := mem.BufferPool(&trackingBufferPool{
 		pool:             *globalPool.Load(),
 		logger:           logger,
-		allocatedBuffers: make(map[*[]byte][]uintptr),
+		allocatedBuffers: make(map[*byte][]uintptr),
 	})
 	globalPool.Store(&newPool)
 }
@@ -145,7 +145,7 @@ type trackingBufferPool struct {
 
 	lock             sync.Mutex
 	bufferCount      int
-	allocatedBuffers map[*[]byte][]uintptr
+	allocatedBuffers map[*byte][]uintptr
 }
 
 func (p *trackingBufferPool) Get(length int) *[]byte {
@@ -153,18 +153,23 @@ func (p *trackingBufferPool) Get(length int) *[]byte {
 	defer p.lock.Unlock()
 	p.bufferCount++
 	buf := p.pool.Get(length)
-	p.allocatedBuffers[buf] = currentStack(2)
+	if length > 0 {
+		p.allocatedBuffers[&(*buf)[0]] = currentStack(2)
+	}
 	return buf
 }
 
 func (p *trackingBufferPool) Put(buf *[]byte) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
-
-	if _, ok := p.allocatedBuffers[buf]; !ok {
+	if len(*buf) == 0 {
+		return
+	}
+	key := &(*buf)[0]
+	if _, ok := p.allocatedBuffers[key]; !ok {
 		p.logger.Errorf("Unknown buffer freed:\n%s", string(debug.Stack()))
 	} else {
-		delete(p.allocatedBuffers, buf)
+		delete(p.allocatedBuffers, key)
 	}
 	p.pool.Put(buf)
 }
