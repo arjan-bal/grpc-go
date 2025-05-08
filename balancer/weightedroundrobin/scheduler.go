@@ -19,6 +19,7 @@
 package weightedroundrobin
 
 import (
+	"fmt"
 	"math"
 )
 
@@ -34,6 +35,7 @@ type scheduler interface {
 func newScheduler(scWeights []float64, inc func() uint32) scheduler {
 	n := len(scWeights)
 	if n == 0 {
+		fmt.Println("Returning nil scheduler!")
 		return nil
 	}
 	if n == 1 {

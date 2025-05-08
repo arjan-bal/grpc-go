@@ -214,6 +214,7 @@ func (b *wrrBalancer) UpdateSubConnState(sc balancer.SubConn, state balancer.Sub
 }
 
 func (b *wrrBalancer) updateSubConnState(sc balancer.SubConn, state balancer.SubConnState) {
+	fmt.Println("Got sc update to", sc, state)
 	wsc := b.scMap[sc]
 	if wsc == nil {
 		b.logger.Errorf("UpdateSubConnState called with an unknown SubConn: %p, %v", sc, state)
@@ -321,6 +322,10 @@ func (b *wrrBalancer) regeneratePicker() {
 		v:        grpcrand.Uint32(), // start the scheduler at a random point
 		cfg:      b.cfg,
 		subConns: b.readySubConns(),
+	}
+	if len(b.readySubConns()) == 0 {
+		fmt.Println(b.connectivityState)
+		panic("Generating ready picker with 0 ready conns!")
 	}
 	var ctx context.Context
 	ctx, b.stopPicker = context.WithCancel(context.Background())
