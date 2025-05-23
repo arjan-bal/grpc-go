@@ -322,9 +322,6 @@ func NewServerTransport(conn net.Conn, config *ServerConfig) (_ ServerTransport,
 	}
 
 	frame, err := t.framer.fr.ReadFrame()
-	if err != nil {
-		t.bufferAllocator.freeBuf()
-	}
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
 		return nil, err
 	}
@@ -664,7 +661,6 @@ func (t *http2Server) HandleStreams(ctx context.Context, handle func(*ServerStre
 		frame, err := t.framer.fr.ReadFrame()
 		atomic.StoreInt64(&t.lastRead, time.Now().UnixNano())
 		if err != nil {
-			t.bufferAllocator.freeBuf()
 			if se, ok := err.(http2.StreamError); ok {
 				if t.logger.V(logLevel) {
 					t.logger.Warningf("Encountered http2.StreamError: %v", se)

@@ -144,6 +144,7 @@ var flagName = map[FrameType]map[Flags]string{
 type frameParser func(fc *frameCache, fh FrameHeader, countError func(string), payload []byte) (Frame, error)
 
 var frameParsers = map[FrameType]frameParser{
+	FrameData:         parseDataFrame,
 	FrameHeaders:      parseHeadersFrame,
 	FramePriority:     parsePriorityFrame,
 	FrameRSTStream:    parseRSTStreamFrame,
@@ -531,37 +532,35 @@ func (fr *Framer) ReadFrame() (Frame, error) {
 	if fh.Length > fr.maxReadSize {
 		return nil, ErrFrameTooLarge
 	}
-	var f Frame
+	payload := fr.allocator(fh.Length)
 	// Optimization for aligning data frame's data to the beginning of the
 	// payload slice.
-	if fh.Type == FrameData {
-		padSize := byte(0)
-		var payload []byte
-		if fh.Flags.Has(FlagDataPadded) {
-			if fh.Length == 0 {
-				fr.countError("frame_data_pad_byte_short")
-				return nil, io.ErrUnexpectedEOF
-			}
-			b := [1]byte{0}
-			if _, err := io.ReadFull(fr.r, b[:]); err != nil {
-				return nil, err
-			}
-			padSize = b[0]
-			payload = fr.allocator(fh.Length - 1)
-		} else {
-			payload = fr.allocator(fh.Length)
+	if fh.Type == FrameData && fh.Flags.Has(FlagDataPadded) {
+		if fh.Length == 0 {
+			fr.countError("frame_data_pad_byte_short")
+			return nil, io.ErrUnexpectedEOF
 		}
+		if _, err := io.ReadFull(fr.r, payload[:1]); err != nil {
+			return nil, err
+		}
+		padSize := payload[0]
+		payload = payload[:len(payload)-1]
 		if _, err := io.ReadFull(fr.r, payload); err != nil {
 			return nil, err
 		}
-		f, err = parseDataFrame(fr.frameCache, fh, fr.countError, payload, padSize)
-	} else {
-		payload := fr.allocator(fh.Length)
-		if _, err := io.ReadFull(fr.r, payload); err != nil {
-			return nil, err
+		if int(padSize) > len(payload) {
+			// If the length of the padding is greater than the
+			// length of the frame payload, the recipient MUST
+			// treat this as a connection error.
+			// Filed: https://github.com/http2/http2-spec/issues/610
+			fr.countError("frame_data_pad_too_big")
+			return nil, fr.connError(http2.ErrCodeProtocol, "pad size larger than data payload")
 		}
-		f, err = typeFrameParser(fh.Type)(fr.frameCache, fh, fr.countError, payload)
+		payload = payload[:len(payload)-int(padSize)]
+	} else if _, err := io.ReadFull(fr.r, payload); err != nil {
+		return nil, err
 	}
+	f, err := typeFrameParser(fh.Type)(fr.frameCache, fh, fr.countError, payload)
 	if err != nil {
 		if ce, ok := err.(connError); ok {
 			return nil, fr.connError(ce.Code, ce.Reason)
@@ -649,7 +648,9 @@ func (f *DataFrame) Data() []byte {
 	return f.data
 }
 
-func parseDataFrame(fc *frameCache, fh FrameHeader, countError func(string), payload []byte, padSize byte) (Frame, error) {
+// parseDataFrame assumes that the padding header at the beginning and the
+// padding bytes are the end are already removed from the payload.
+func parseDataFrame(fc *frameCache, fh FrameHeader, countError func(string), payload []byte) (Frame, error) {
 	if fh.StreamID == 0 {
 		// DATA frames MUST be associated with a stream. If a
 		// DATA frame is received whose stream identifier
@@ -661,16 +662,7 @@ func parseDataFrame(fc *frameCache, fh FrameHeader, countError func(string), pay
 	}
 	f := fc.getDataFrame()
 	f.FrameHeader = fh
-
-	if int(padSize) > len(payload) {
-		// If the length of the padding is greater than the
-		// length of the frame payload, the recipient MUST
-		// treat this as a connection error.
-		// Filed: https://github.com/http2/http2-spec/issues/610
-		countError("frame_data_pad_too_big")
-		return nil, connError{http2.ErrCodeProtocol, "pad size larger than data payload"}
-	}
-	f.data = payload[:len(payload)-int(padSize)]
+	f.data = payload
 	return f, nil
 }
 

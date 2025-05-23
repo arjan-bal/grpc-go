@@ -184,13 +184,6 @@ func (b *bufferAllocator) get(size uint32) []byte {
 	return *b.curBuf
 }
 
-func (b *bufferAllocator) freeBuf() {
-	if b.curBuf == nil {
-		return
-	}
-	b.bufferPool.Put(b.curBuf)
-}
-
 func dial(ctx context.Context, fn func(context.Context, string) (net.Conn, error), addr resolver.Address, grpcUA string) (net.Conn, error) {
 	address := addr.Addr
 	networkType, ok := networktype.Get(addr)
@@ -1637,7 +1630,6 @@ func (t *http2Client) operateHeaders(frame *grpchttp2.MetaHeadersFrame) {
 func (t *http2Client) readServerPreface() error {
 	frame, err := t.framer.fr.ReadFrame()
 	if err != nil {
-		t.bufferAllocator.freeBuf()
 		return connectionErrorf(true, err, "error reading server preface: %v", err)
 	}
 	sf, ok := frame.(*grpchttp2.SettingsFrame)
@@ -1677,7 +1669,6 @@ func (t *http2Client) reader(errCh chan<- error) {
 			atomic.StoreInt64(&t.lastRead, time.Now().UnixNano())
 		}
 		if err != nil {
-			t.bufferAllocator.freeBuf()
 			// Abort an active stream if the http2.Framer returns a
 			// http2.StreamError. This can happen only if the server's response
 			// is malformed http2.
