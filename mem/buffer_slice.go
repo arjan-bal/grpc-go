@@ -71,6 +71,42 @@ func (s BufferSlice) Free() {
 	}
 }
 
+func (s *BufferSlice) SplitUnsafe(offset int) (BufferSlice, BufferSlice) {
+	sumBytes := 0
+	var rightSlices BufferSlice
+	firstLeft := true
+
+	for i, b := range *s {
+		if sumBytes >= offset {
+			if firstLeft {
+				*s = (*s)[:i]
+				firstLeft = false
+			}
+			// completely in right.
+			rightSlices = append(rightSlices, b)
+			continue
+		}
+		curLen := b.Len()
+		if sumBytes+curLen <= offset {
+			// completely in left.
+			sumBytes += curLen
+			continue
+		}
+		// partially in left, partially in right.
+		left, right := b.split(offset - sumBytes)
+		(*s)[i] = left
+		firstLeft = false
+		(*s) = (*s)[:i+1]
+		rightSlices = append(rightSlices, right)
+		sumBytes += curLen
+	}
+	return *s, rightSlices
+}
+
+func (s BufferSlice) ReadOnlyData() []byte {
+	return s.Materialize()
+}
+
 // CopyTo copies each of the underlying Buffer's data into the given buffer,
 // returning the number of bytes copied. Has the same semantics as the copy
 // builtin in that it will copy as many bytes as it can, stopping when either dst
