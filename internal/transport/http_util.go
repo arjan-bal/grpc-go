@@ -19,11 +19,9 @@
 package transport
 
 import (
-	"bufio"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net"
 	"net/http"
@@ -38,6 +36,7 @@ import (
 	"golang.org/x/net/http2/hpack"
 	"google.golang.org/grpc/codes"
 	grpchttp2 "google.golang.org/grpc/internal/transport/http2"
+	"google.golang.org/grpc/mem"
 )
 
 const (
@@ -404,18 +403,16 @@ func newFramer(conn net.Conn, writeBufferSize, readBufferSize int, sharedWriteBu
 	if writeBufferSize < 0 {
 		writeBufferSize = 0
 	}
-	var r io.Reader = conn
-	if readBufferSize > 0 {
-		r = bufio.NewReaderSize(r, readBufferSize)
-	}
+	readBufferSize = max(1, readBufferSize)
 	var pool *sync.Pool
+	r := mem.NewBufferReader(readBufferSize, mem.DefaultBufferPool(), conn)
 	if sharedWriteBuffer {
 		pool = getWriteBufferPool(writeBufferSize)
 	}
 	w := newBufWriter(conn, writeBufferSize, pool)
 	f := &framer{
 		writer: w,
-		fr:     grpchttp2.NewFramer(w, r),
+		fr:     grpchttp2.NewFramer(w, &r),
 	}
 	f.fr.SetMaxReadFrameSize(http2MaxFrameLen)
 	// Opt-in to Frame reuse API on framer to reduce garbage.
