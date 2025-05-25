@@ -22,6 +22,7 @@
 package transport
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -64,7 +65,7 @@ type recvMsg struct {
 type recvBuffer struct {
 	c       chan recvMsg
 	mu      sync.Mutex
-	backlog []recvMsg
+	backlog list.List
 	err     error
 }
 
@@ -87,7 +88,7 @@ func (b *recvBuffer) put(r recvMsg) {
 		return
 	}
 	b.err = r.err
-	if len(b.backlog) == 0 {
+	if b.backlog.Len() == 0 {
 		select {
 		case b.c <- r:
 			b.mu.Unlock()
@@ -95,17 +96,17 @@ func (b *recvBuffer) put(r recvMsg) {
 		default:
 		}
 	}
-	b.backlog = append(b.backlog, r)
+	b.backlog.PushBack(r)
 	b.mu.Unlock()
 }
 
 func (b *recvBuffer) load() {
 	b.mu.Lock()
-	if len(b.backlog) > 0 {
+	if b.backlog.Len() > 0 {
+		ele := b.backlog.Front()
 		select {
-		case b.c <- b.backlog[0]:
-			b.backlog[0] = recvMsg{}
-			b.backlog = b.backlog[1:]
+		case b.c <- ele.Value.(recvMsg):
+			b.backlog.Remove(ele)
 		default:
 		}
 	}
