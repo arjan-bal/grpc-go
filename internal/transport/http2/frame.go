@@ -503,25 +503,17 @@ func terminalReadFrameError(err error) bool {
 	return err != nil
 }
 
-// ReadFrame reads a single frame. The returned Frame is only valid
-// until the next call to ReadFrame.
-//
-// If the frame is larger than previously set with SetMaxReadFrameSize, the
-// returned error is ErrFrameTooLarge. Other errors may be of type
-// ConnectionError, StreamError, or anything else from the underlying
-// reader.
-//
-// If ReadFrame returns an error and a non-nil Frame, the Frame's StreamID
-// indicates the stream responsible for the error.
-func (fr *Framer) ReadFrame() (Frame, error) {
+// ReadFrameHeader
+func (fr *Framer) ReadFrameHeader() (FrameHeader, error) {
 	fr.errDetail = nil
 	if fr.lastFrame != nil {
 		fr.lastFrame.invalidate()
 	}
-	fh, err := readFrameHeader(fr.headerBuf[:], fr.r)
-	if err != nil {
-		return nil, err
-	}
+	return readFrameHeader(fr.headerBuf[:], fr.r)
+}
+
+// ReadFrameBodyForHeader
+func (fr *Framer) ReadFrameBodyForHeader(fh FrameHeader) (Frame, error) {
 	if fh.Length > fr.maxReadSize {
 		return nil, ErrFrameTooLarge
 	}
@@ -546,6 +538,25 @@ func (fr *Framer) ReadFrame() (Frame, error) {
 		return fr.readMetaFrame(f.(*HeadersFrame))
 	}
 	return f, nil
+
+}
+
+// ReadFrame reads a single frame. The returned Frame is only valid
+// until the next call to ReadFrame.
+//
+// If the frame is larger than previously set with SetMaxReadFrameSize, the
+// returned error is ErrFrameTooLarge. Other errors may be of type
+// ConnectionError, StreamError, or anything else from the underlying
+// reader.
+//
+// If ReadFrame returns an error and a non-nil Frame, the Frame's StreamID
+// indicates the stream responsible for the error.
+func (fr *Framer) ReadFrame() (Frame, error) {
+	fh, err := fr.ReadFrameHeader()
+	if err != nil {
+		return nil, err
+	}
+	return fr.ReadFrameBodyForHeader(fh)
 }
 
 // connError returns ConnectionError(code) but first

@@ -391,6 +391,7 @@ func toIOError(err error) error {
 
 type framer struct {
 	writer *bufWriter
+	reader io.Reader
 	fr     *grpchttp2.Framer
 }
 
@@ -411,6 +412,7 @@ func newFramer(conn net.Conn, writeBufferSize, readBufferSize int, sharedWriteBu
 	}
 	w := newBufWriter(conn, writeBufferSize, pool)
 	f := &framer{
+		reader: r,
 		writer: w,
 		fr:     grpchttp2.NewFramer(w, r),
 	}

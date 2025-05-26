@@ -150,6 +150,7 @@ type http2Client struct {
 	onClose func(GoAwayReason)
 
 	bufferPool mem.BufferPool
+	df         *df
 
 	connectionID uint64
 	logger       *grpclog.PrefixLogger
@@ -354,6 +355,7 @@ func NewHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 		keepaliveEnabled:      keepaliveEnabled,
 		bufferPool:            opts.BufferPool,
 		onClose:               onClose,
+		df:                    &df{},
 	}
 	var czSecurity credentials.ChannelzSecurityValue
 	if au, ok := authInfo.(credentials.ChannelzSecurityInfo); ok {
@@ -1102,7 +1104,7 @@ func (t *http2Client) write(s *ClientStream, hdr []byte, data mem.BufferSlice, o
 	return nil
 }
 
-func (t *http2Client) getStream(f grpchttp2.Frame) *ClientStream {
+func (t *http2Client) getStream(f frame) *ClientStream {
 	t.mu.Lock()
 	s := t.activeStreams[f.Header().StreamID]
 	t.mu.Unlock()
@@ -1151,7 +1153,7 @@ func (t *http2Client) updateFlowControl(n uint32) {
 	})
 }
 
-func (t *http2Client) handleData(f *grpchttp2.DataFrame) {
+func (t *http2Client) handleData(f *df) {
 	size := f.Header().Length
 	var sendBDPPing bool
 	if t.bdpEst != nil {
@@ -1196,21 +1198,21 @@ func (t *http2Client) handleData(f *grpchttp2.DataFrame) {
 			return
 		}
 		if f.Header().Flags.Has(grpchttp2.FlagDataPadded) {
-			if w := s.fc.onRead(size - uint32(len(f.Data()))); w > 0 {
+			if w := s.fc.onRead(size - uint32(len(*f.data))); w > 0 {
 				t.controlBuf.put(&outgoingWindowUpdate{s.id, w})
 			}
 		}
 		// TODO(bradfitz, zhaoq): A copy is required here because there is no
 		// guarantee f.Data() is consumed before the arrival of next frame.
 		// Can this copy be eliminated?
-		if len(f.Data()) > 0 {
+		if len(*f.data) > 0 {
 			pool := t.bufferPool
 			if pool == nil {
 				// Note that this is only supposed to be nil in tests. Otherwise, stream is
 				// always initialized with a BufferPool.
 				pool = mem.DefaultBufferPool()
 			}
-			s.write(recvMsg{buffer: mem.Copy(f.Data(), pool)})
+			s.write(recvMsg{buffer: mem.NewBuffer(f.data, pool)})
 		}
 	}
 	// The server has closed the stream without sending trailers.  Record that
@@ -1613,6 +1615,65 @@ func (t *http2Client) readServerPreface() error {
 	return nil
 }
 
+// frame is an h2 frame.
+type frame interface {
+	Header() grpchttp2.FrameHeader
+}
+
+type df struct {
+	data   *[]byte
+	header grpchttp2.FrameHeader
+}
+
+func (d *df) Header() grpchttp2.FrameHeader {
+	return d.header
+}
+
+func (d *df) StreamEnded() bool {
+	return d.header.Flags.Has(grpchttp2.FlagDataEndStream)
+}
+
+func parseDataFrame(r io.Reader, fh grpchttp2.FrameHeader, payload *[]byte, f *df) error {
+	if fh.Length > 16384 {
+		return grpchttp2.ErrFrameTooLarge
+	}
+	if fh.Flags.Has(grpchttp2.FlagDataPadded) {
+		if fh.Length == 0 {
+			return io.ErrUnexpectedEOF
+		}
+		if _, err := io.ReadFull(r, (*payload)[:1]); err != nil {
+			return err
+		}
+		padSize := (*payload)[0]
+		*payload = (*payload)[:len(*payload)-1]
+		if _, err := io.ReadFull(r, *payload); err != nil {
+			return err
+		}
+		if int(padSize) > len(*payload) {
+			// If the length of the padding is greater than the
+			// length of the frame payload, the recipient MUST
+			// treat this as a connection error.
+			// Filed: https://github.com/http2/http2-spec/issues/610
+			return fmt.Errorf("pad size larger than data payload")
+		}
+		*payload = (*payload)[:len(*payload)-int(padSize)]
+	} else if _, err := io.ReadFull(r, *payload); err != nil {
+		return err
+	}
+	if fh.StreamID == 0 {
+		// DATA frames MUST be associated with a stream. If a
+		// DATA frame is received whose stream identifier
+		// field is 0x0, the recipient MUST respond with a
+		// connection error (Section 5.4.1) of type
+		// PROTOCOL_ERROR.
+		return fmt.Errorf("DATA frame with stream ID 0")
+	}
+
+	f.header = fh
+	f.data = payload
+	return nil
+}
+
 // reader verifies the server preface and reads all subsequent data from
 // network connection.  If the server preface is not read successfully, an
 // error is pushed to errCh; otherwise errCh is closed with no error.
@@ -1624,6 +1685,10 @@ func (t *http2Client) reader(errCh chan<- error) {
 			t.Close(errClose)
 		}
 	}()
+	pool := t.bufferPool
+	if pool == nil {
+		pool = mem.DefaultBufferPool()
+	}
 
 	if err := t.readServerPreface(); err != nil {
 		errCh <- err
@@ -1637,7 +1702,18 @@ func (t *http2Client) reader(errCh chan<- error) {
 	// loop to keep reading incoming messages on this transport.
 	for {
 		t.controlBuf.throttle()
-		frame, err := t.framer.fr.ReadFrame()
+		fh, err := t.framer.fr.ReadFrameHeader()
+		var frame frame
+		if err == nil {
+			switch fh.Type {
+			case grpchttp2.FrameData:
+				payload := pool.Get(int(fh.Length))
+				err = parseDataFrame(t.framer.reader, fh, payload, t.df)
+				frame = t.df
+			default:
+				frame, err = t.framer.fr.ReadFrameBodyForHeader(fh)
+			}
+		}
 		if t.keepaliveEnabled {
 			atomic.StoreInt64(&t.lastRead, time.Now().UnixNano())
 		}
@@ -1670,7 +1746,7 @@ func (t *http2Client) reader(errCh chan<- error) {
 		switch frame := frame.(type) {
 		case *grpchttp2.MetaHeadersFrame:
 			t.operateHeaders(frame)
-		case *grpchttp2.DataFrame:
+		case *df:
 			t.handleData(frame)
 		case *grpchttp2.RSTStreamFrame:
 			t.handleRSTStream(frame)

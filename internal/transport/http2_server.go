@@ -123,6 +123,7 @@ type http2Server struct {
 	// Fields below are for channelz metric collection.
 	channelz   *channelz.Socket
 	bufferPool mem.BufferPool
+	df         *df
 
 	connectionID uint64
 
@@ -265,6 +266,7 @@ func NewServerTransport(conn net.Conn, config *ServerConfig) (_ ServerTransport,
 		kep:               kep,
 		initialWindowSize: iwz,
 		bufferPool:        config.BufferPool,
+		df:                &df{},
 	}
 	var czSecurity credentials.ChannelzSecurityValue
 	if au, ok := authInfo.(credentials.ChannelzSecurityInfo); ok {
@@ -653,9 +655,24 @@ func (t *http2Server) HandleStreams(ctx context.Context, handle func(*ServerStre
 		close(t.readerDone)
 		<-t.loopyWriterDone
 	}()
+	pool := t.bufferPool
+	if pool == nil {
+		pool = mem.DefaultBufferPool()
+	}
 	for {
 		t.controlBuf.throttle()
-		frame, err := t.framer.fr.ReadFrame()
+		fh, err := t.framer.fr.ReadFrameHeader()
+		var frame frame
+		if err == nil {
+			switch fh.Type {
+			case grpchttp2.FrameData:
+				payload := pool.Get(int(fh.Length))
+				err = parseDataFrame(t.framer.reader, fh, payload, t.df)
+				frame = t.df
+			default:
+				frame, err = t.framer.fr.ReadFrameBodyForHeader(fh)
+			}
+		}
 		atomic.StoreInt64(&t.lastRead, time.Now().UnixNano())
 		if err != nil {
 			if se, ok := err.(http2.StreamError); ok {
@@ -692,7 +709,7 @@ func (t *http2Server) HandleStreams(ctx context.Context, handle func(*ServerStre
 				})
 				continue
 			}
-		case *grpchttp2.DataFrame:
+		case *df:
 			t.handleData(frame)
 		case *grpchttp2.RSTStreamFrame:
 			t.handleRSTStream(frame)
@@ -712,7 +729,7 @@ func (t *http2Server) HandleStreams(ctx context.Context, handle func(*ServerStre
 	}
 }
 
-func (t *http2Server) getStream(f grpchttp2.Frame) (*ServerStream, bool) {
+func (t *http2Server) getStream(f frame) (*ServerStream, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.activeStreams == nil {
@@ -773,7 +790,7 @@ func (t *http2Server) updateFlowControl(n uint32) {
 
 }
 
-func (t *http2Server) handleData(f *grpchttp2.DataFrame) {
+func (t *http2Server) handleData(f *df) {
 	size := f.Header().Length
 	var sendBDPPing bool
 	if t.bdpEst != nil {
@@ -819,21 +836,21 @@ func (t *http2Server) handleData(f *grpchttp2.DataFrame) {
 			return
 		}
 		if f.Header().Flags.Has(grpchttp2.FlagDataPadded) {
-			if w := s.fc.onRead(size - uint32(len(f.Data()))); w > 0 {
+			if w := s.fc.onRead(size - uint32(len(*f.data))); w > 0 {
 				t.controlBuf.put(&outgoingWindowUpdate{s.id, w})
 			}
 		}
 		// TODO(bradfitz, zhaoq): A copy is required here because there is no
 		// guarantee f.Data() is consumed before the arrival of next frame.
 		// Can this copy be eliminated?
-		if len(f.Data()) > 0 {
+		if len(*f.data) > 0 {
 			pool := t.bufferPool
 			if pool == nil {
 				// Note that this is only supposed to be nil in tests. Otherwise, stream is
 				// always initialized with a BufferPool.
 				pool = mem.DefaultBufferPool()
 			}
-			s.write(recvMsg{buffer: mem.Copy(f.Data(), pool)})
+			s.write(recvMsg{buffer: mem.NewBuffer(f.data, pool)})
 		}
 	}
 	if f.StreamEnded() {
