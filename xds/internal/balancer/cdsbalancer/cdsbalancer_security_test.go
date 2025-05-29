@@ -25,6 +25,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/google/go-cmp/cmp"
@@ -136,7 +137,7 @@ func registerWrappedCDSPolicyWithNewSubConnOverride(t *testing.T, ch chan *xdscr
 // Returns the following:
 // - a client channel to make RPCs
 // - address of the test backend server
-func setupForSecurityTests(t *testing.T, bootstrapContents []byte, clientCreds, serverCreds credentials.TransportCredentials) (*grpc.ClientConn, string) {
+func setupForSecurityTests(t *testing.T, bootstrapContents []byte, clientCreds, serverCreds credentials.TransportCredentials) (*grpc.ClientConn, string, *manual.Resolver) {
 	t.Helper()
 
 	config, err := bootstrap.NewConfigFromContents(bootstrapContents)
@@ -182,7 +183,7 @@ func setupForSecurityTests(t *testing.T, bootstrapContents []byte, clientCreds, 
 	server := stubserver.StartTestService(t, nil, sOpts...)
 	t.Cleanup(server.Stop)
 
-	return cc, server.Address
+	return cc, server.Address, r
 }
 
 // Creates transport credentials to be used on the client side that rely on xDS
@@ -278,7 +279,7 @@ func (s) TestSecurityConfigWithoutXDSCreds(t *testing.T) {
 
 	// Create a grpc channel with insecure creds talking to a test server with
 	// insecure credentials.
-	cc, serverAddress := setupForSecurityTests(t, bc, insecure.NewCredentials(), nil)
+	cc, serverAddress, _ := setupForSecurityTests(t, bc, insecure.NewCredentials(), nil)
 
 	// Configure cluster and endpoints resources in the management server. The
 	// cluster resource is configured to return security configuration.
@@ -332,7 +333,7 @@ func (s) TestNoSecurityConfigWithXDSCreds(t *testing.T) {
 
 	// Create a grpc channel with xDS creds talking to a test server with
 	// insecure credentials.
-	cc, serverAddress := setupForSecurityTests(t, bc, xdsClientCredsWithInsecureFallback(t), nil)
+	cc, serverAddress, _ := setupForSecurityTests(t, bc, xdsClientCredsWithInsecureFallback(t), nil)
 
 	// Configure cluster and endpoints resources in the management server. The
 	// cluster resource is not configured to return any security configuration.
@@ -393,7 +394,7 @@ func (s) TestSecurityConfigNotFoundInBootstrap(t *testing.T) {
 	}
 
 	// Create a grpc channel with xDS creds.
-	cc, _ := setupForSecurityTests(t, bootstrapContents, xdsClientCredsWithInsecureFallback(t), nil)
+	cc, _, r := setupForSecurityTests(t, bootstrapContents, xdsClientCredsWithInsecureFallback(t), nil)
 
 	// Configure a cluster resource that contains security configuration, in the
 	// management server.
@@ -409,6 +410,16 @@ func (s) TestSecurityConfigNotFoundInBootstrap(t *testing.T) {
 	}
 
 	testutils.AwaitState(ctx, t, cc, connectivity.TransientFailure)
+	cc.Close()
+
+	clientCreds := xdsClientCredsWithInsecureFallback(t)
+	cc2, err := grpc.NewClient(r.Scheme()+":///test.service", grpc.WithTransportCredentials(clientCreds), grpc.WithResolvers(r))
+	if err != nil {
+		t.Fatalf("grpc.NewClient() failed: %v", err)
+	}
+	cc2.Connect()
+	testutils.AwaitState(ctx, t, cc2, connectivity.TransientFailure)
+	time.Sleep(time.Second)
 }
 
 // A certificate provider builder that returns a nil Provider from the starter
@@ -460,7 +471,7 @@ func (s) TestCertproviderStoreError(t *testing.T) {
 	}
 
 	// Create a grpc channel with xDS creds.
-	cc, _ := setupForSecurityTests(t, bootstrapContents, xdsClientCredsWithInsecureFallback(t), nil)
+	cc, _, _ := setupForSecurityTests(t, bootstrapContents, xdsClientCredsWithInsecureFallback(t), nil)
 
 	// Configure a cluster resource that contains security configuration, in the
 	// management server.
@@ -493,7 +504,7 @@ func (s) TestGoodSecurityConfig(t *testing.T) {
 
 	// Create a grpc channel with xDS creds talking to a test server with TLS
 	// credentials.
-	cc, serverAddress := setupForSecurityTests(t, bc, xdsClientCredsWithInsecureFallback(t), tlsServerCreds(t))
+	cc, serverAddress, _ := setupForSecurityTests(t, bc, xdsClientCredsWithInsecureFallback(t), tlsServerCreds(t))
 
 	// Configure cluster and endpoints resources in the management server. The
 	// cluster resource is configured to return security configuration.
@@ -535,7 +546,7 @@ func (s) TestSecurityConfigUpdate_BadToGood(t *testing.T) {
 
 	// Create a grpc channel with xDS creds talking to a test server with TLS
 	// credentials.
-	cc, serverAddress := setupForSecurityTests(t, bc, xdsClientCredsWithInsecureFallback(t), tlsServerCreds(t))
+	cc, serverAddress, _ := setupForSecurityTests(t, bc, xdsClientCredsWithInsecureFallback(t), tlsServerCreds(t))
 
 	// Configure cluster and endpoints resources in the management server. The
 	// cluster resource contains security configuration with a certificate
@@ -607,7 +618,7 @@ func (s) TestSecurityConfigUpdate_GoodToFallback(t *testing.T) {
 
 	// Create a grpc channel with xDS creds talking to a test server with TLS
 	// credentials.
-	cc, serverAddress := setupForSecurityTests(t, bc, xdsClientCredsWithInsecureFallback(t), tlsServerCreds(t))
+	cc, serverAddress, _ := setupForSecurityTests(t, bc, xdsClientCredsWithInsecureFallback(t), tlsServerCreds(t))
 
 	// Configure cluster and endpoints resources in the management server. The
 	// cluster resource is configured to return security configuration.
@@ -686,7 +697,7 @@ func (s) TestSecurityConfigUpdate_GoodToBad(t *testing.T) {
 
 	// Create a grpc channel with xDS creds talking to a test server with TLS
 	// credentials.
-	cc, serverAddress := setupForSecurityTests(t, bc, xdsClientCredsWithInsecureFallback(t), tlsServerCreds(t))
+	cc, serverAddress, _ := setupForSecurityTests(t, bc, xdsClientCredsWithInsecureFallback(t), tlsServerCreds(t))
 
 	// Configure cluster and endpoints resources in the management server. The
 	// cluster resource is configured to return security configuration.
@@ -791,7 +802,7 @@ func (s) TestSystemRootCertsSecurityConfig(t *testing.T) {
 
 	// Create a grpc channel with xDS creds talking to a test server with TLS
 	// credentials.
-	cc, serverAddress := setupForSecurityTests(t, bc, xdsClientCredsWithInsecureFallback(t), tlsServerCreds(t))
+	cc, serverAddress, _ := setupForSecurityTests(t, bc, xdsClientCredsWithInsecureFallback(t), tlsServerCreds(t))
 
 	// Configure cluster and endpoints resources in the management server. The
 	// cluster resource is configured to return security configuration.

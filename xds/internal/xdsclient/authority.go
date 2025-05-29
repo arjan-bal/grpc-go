@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"google.golang.org/grpc/experimental/stats"
 	"google.golang.org/grpc/grpclog"
@@ -558,6 +559,10 @@ func (a *authority) handleRevertingToPrimaryOnUpdate(serverConfig *bootstrap.Ser
 	// received from a server, all lower priority servers are closed.
 	serverIdx := a.serverIndexForConfig(serverConfig)
 	a.activeXDSChannel = a.xdsChannelConfigs[serverIdx]
+	if a.activeXDSChannel.channel == nil {
+		fmt.Println("Debug: active channel is nil!")
+		// panic("Found it")
+	}
 
 	// Close all lower priority channels.
 	//
@@ -701,6 +706,9 @@ func (a *authority) unwatchResource(rType xdsresource.Type, resourceName string,
 	return sync.OnceFunc(func() {
 		done := make(chan struct{})
 		a.xdsClientSerializer.ScheduleOr(func(context.Context) {
+			fmt.Println("Debug: beginning sleep")
+			time.Sleep(10 * time.Millisecond)
+			fmt.Println("Debug: ended sleep")
 			defer close(done)
 
 			if a.logger.V(2) {
