@@ -820,7 +820,8 @@ func (t *http2Server) handleData(f *grpchttp2.DataFrame) {
 			return
 		}
 		buf := f.Data()
-		blen := buf.Len()
+		bslice := buf.ToSlice()
+		blen := bslice.Len()
 		if f.Header().Flags.Has(grpchttp2.FlagDataPadded) {
 			if w := s.fc.onRead(size - uint32(blen)); w > 0 {
 				t.controlBuf.put(&outgoingWindowUpdate{s.id, w})
@@ -829,9 +830,11 @@ func (t *http2Server) handleData(f *grpchttp2.DataFrame) {
 		// TODO(bradfitz, zhaoq): A copy is required here because there is no
 		// guarantee f.Data() is consumed before the arrival of next frame.
 		// Can this copy be eliminated?
-		for _, b := range buf {
+		for _, b := range bslice {
+			b.Ref()
 			s.write(recvMsg{buffer: b})
 		}
+		buf.Free()
 	}
 	if f.StreamEnded() {
 		// Received the end of stream from the client.

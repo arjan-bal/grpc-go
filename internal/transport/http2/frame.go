@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/http/httpguts"
 	"golang.org/x/net/http2"
@@ -141,7 +142,7 @@ var flagName = map[FrameType]map[Flags]string{
 // a frameParser parses a frame given its FrameHeader and payload
 // bytes. The length of payload will always equal fh.Length (which
 // might be 0).
-type frameParser func(fc *frameCache, fh FrameHeader, countError func(string), payload mem.BufferSlice) (Frame, error)
+type frameParser func(fc *frameCache, fh FrameHeader, countError func(string), payload *mem.CompoundBuffer, buf []byte) (Frame, error)
 
 var frameParsers = map[FrameType]frameParser{
 	FrameData:         parseDataFrame,
@@ -235,19 +236,30 @@ func (h *FrameHeader) checkValid() {
 
 func (h *FrameHeader) invalidate() { h.valid = false }
 
+// frame header bytes.Add commentMore actions
+// Used only by ReadFrameHeader.
+var fhBytes = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, frameHeaderLen)
+		return &buf
+	},
+}
+
 // ReadFrameHeader reads 9 bytes from r and returns a FrameHeader.
 // Most users should use Framer.ReadFrame instead.
 func ReadFrameHeader(r *mem.BufferedReader) (FrameHeader, error) {
-	return readFrameHeader(r)
+	bufp := fhBytes.Get().(*[]byte)
+	defer fhBytes.Put(bufp)
+	return readFrameHeader(*bufp, r)
 }
 
-func readFrameHeader(r *mem.BufferedReader) (FrameHeader, error) {
+func readFrameHeader(buf []byte, r *mem.BufferedReader) (FrameHeader, error) {
 	b, err := r.Read(frameHeaderLen)
 	if err != nil {
 		return FrameHeader{}, err
 	}
 	defer b.Free()
-	buf := b.Materialize()
+	_ = b.ToSlice().CopyTo(buf)
 	return FrameHeader{
 		Length:   (uint32(buf[0])<<16 | uint32(buf[1])<<8 | uint32(buf[2])),
 		Type:     FrameType(buf[3]),
@@ -287,6 +299,13 @@ type Framer struct {
 	lastHeaderStream uint32
 
 	maxReadSize uint32
+	headerBuf   [frameHeaderLen]byte
+
+	// TODO: let getReadBuf be configurable, and use a less memory-pinningAdd commentMore actions
+	// allocator in server.go to minimize memory pinned for many idle conns.
+	// Will probably also need to make frame invalidation have a hook too.
+	getReadBuf func(size uint32) []byte
+	readBuf    []byte // cache for default getReadBuf
 
 	maxWriteSize uint32 // zero means unlimited; TODO: implement
 
@@ -442,6 +461,13 @@ func NewFramer(w io.Writer, r *mem.BufferedReader) *Framer {
 		debugReadLoggerf:  log.Printf,
 		debugWriteLoggerf: log.Printf,
 	}
+	fr.getReadBuf = func(size uint32) []byte {
+		if cap(fr.readBuf) >= int(size) {
+			return fr.readBuf[:size]
+		}
+		fr.readBuf = make([]byte, size)
+		return fr.readBuf
+	}
 	fr.SetMaxReadFrameSize(maxFrameSize)
 	return fr
 }
@@ -496,7 +522,7 @@ func (fr *Framer) ReadFrame() (Frame, error) {
 	if fr.lastFrame != nil {
 		fr.lastFrame.invalidate()
 	}
-	fh, err := readFrameHeader(fr.r)
+	fh, err := readFrameHeader(fr.headerBuf[:], fr.r)
 	if err != nil {
 		return nil, err
 	}
@@ -507,7 +533,8 @@ func (fr *Framer) ReadFrame() (Frame, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := typeFrameParser(fh.Type)(fr.frameCache, fh, fr.countError, bufSlice)
+	payload := fr.getReadBuf(fh.Length)
+	f, err := typeFrameParser(fh.Type)(fr.frameCache, fh, fr.countError, bufSlice, payload)
 	if err != nil {
 		if ce, ok := err.(connError); ok {
 			return nil, fr.connError(ce.Code, ce.Reason)
@@ -579,7 +606,7 @@ func (fr *Framer) checkFrameOrder(f Frame) error {
 // See https://httpwg.org/specs/rfc7540.html#rfc.section.6.1
 type DataFrame struct {
 	FrameHeader
-	data mem.BufferSlice
+	data *mem.CompoundBuffer
 }
 
 func (f *DataFrame) StreamEnded() bool {
@@ -590,12 +617,12 @@ func (f *DataFrame) StreamEnded() bool {
 // size byte or padding suffix bytes.
 // The caller must not retain the returned memory past the next
 // call to ReadFrame.
-func (f *DataFrame) Data() mem.BufferSlice {
+func (f *DataFrame) Data() *mem.CompoundBuffer {
 	f.checkValid()
 	return f.data
 }
 
-func parseDataFrame(fc *frameCache, fh FrameHeader, countError func(string), payload mem.BufferSlice) (Frame, error) {
+func parseDataFrame(fc *frameCache, fh FrameHeader, countError func(string), payload *mem.CompoundBuffer, buf []byte) (Frame, error) {
 	if fh.StreamID == 0 {
 		// DATA frames MUST be associated with a stream. If a
 		// DATA frame is received whose stream identifier
@@ -729,8 +756,8 @@ type SettingsFrame struct {
 	p []byte
 }
 
-func parseSettingsFrame(_ *frameCache, fh FrameHeader, countError func(string), bs mem.BufferSlice) (Frame, error) {
-	p := bs.Materialize()
+func parseSettingsFrame(_ *frameCache, fh FrameHeader, countError func(string), bs *mem.CompoundBuffer, p []byte) (Frame, error) {
+	_ = bs.ToSlice().CopyTo(p)
 	bs.Free()
 	if fh.Flags.Has(FlagSettingsAck) && fh.Length > 0 {
 		// When this (ACK 0x1) bit is set, the payload of the
@@ -872,8 +899,8 @@ type PingFrame struct {
 
 func (f *PingFrame) IsAck() bool { return f.Flags.Has(FlagPingAck) }
 
-func parsePingFrame(_ *frameCache, fh FrameHeader, countError func(string), bs mem.BufferSlice) (Frame, error) {
-	payload := bs.Materialize()
+func parsePingFrame(_ *frameCache, fh FrameHeader, countError func(string), bs *mem.CompoundBuffer, payload []byte) (Frame, error) {
+	_ = bs.ToSlice().CopyTo(payload)
 	bs.Free()
 	if len(payload) != 8 {
 		countError("frame_ping_length")
@@ -916,8 +943,8 @@ func (f *GoAwayFrame) DebugData() []byte {
 	return f.debugData
 }
 
-func parseGoAwayFrame(_ *frameCache, fh FrameHeader, countError func(string), bs mem.BufferSlice) (Frame, error) {
-	p := bs.Materialize()
+func parseGoAwayFrame(_ *frameCache, fh FrameHeader, countError func(string), bs *mem.CompoundBuffer, p []byte) (Frame, error) {
+	_ = bs.ToSlice().CopyTo(p)
 	bs.Free()
 	if fh.StreamID != 0 {
 		countError("frame_goaway_has_stream")
@@ -960,10 +987,10 @@ func (f *UnknownFrame) Payload() []byte {
 	return f.p
 }
 
-func parseUnknownFrame(_ *frameCache, fh FrameHeader, countError func(string), bs mem.BufferSlice) (Frame, error) {
-	p := bs.Materialize()
+func parseUnknownFrame(_ *frameCache, fh FrameHeader, countError func(string), bs *mem.CompoundBuffer, buf []byte) (Frame, error) {
+	_ = bs.ToSlice().CopyTo(buf)
 	bs.Free()
-	return &UnknownFrame{fh, p}, nil
+	return &UnknownFrame{fh, buf}, nil
 }
 
 // A WindowUpdateFrame is used to implement flow control.
@@ -973,8 +1000,8 @@ type WindowUpdateFrame struct {
 	Increment uint32 // never read with high bit set
 }
 
-func parseWindowUpdateFrame(_ *frameCache, fh FrameHeader, countError func(string), bs mem.BufferSlice) (Frame, error) {
-	p := bs.Materialize()
+func parseWindowUpdateFrame(_ *frameCache, fh FrameHeader, countError func(string), bs *mem.CompoundBuffer, p []byte) (Frame, error) {
+	_ = bs.ToSlice().CopyTo(p)
 	bs.Free()
 	if len(p) != 4 {
 		countError("frame_windowupdate_bad_len")
@@ -1043,8 +1070,8 @@ func (f *HeadersFrame) HasPriority() bool {
 	return f.FrameHeader.Flags.Has(FlagHeadersPriority)
 }
 
-func parseHeadersFrame(_ *frameCache, fh FrameHeader, countError func(string), bs mem.BufferSlice) (_ Frame, err error) {
-	p := bs.Materialize()
+func parseHeadersFrame(_ *frameCache, fh FrameHeader, countError func(string), bs *mem.CompoundBuffer, p []byte) (_ Frame, err error) {
+	_ = bs.ToSlice().CopyTo(p)
 	bs.Free()
 	hf := &HeadersFrame{
 		FrameHeader: fh,
@@ -1187,8 +1214,8 @@ func (p PriorityParam) IsZero() bool {
 	return p == PriorityParam{}
 }
 
-func parsePriorityFrame(_ *frameCache, fh FrameHeader, countError func(string), bs mem.BufferSlice) (Frame, error) {
-	payload := bs.Materialize()
+func parsePriorityFrame(_ *frameCache, fh FrameHeader, countError func(string), bs *mem.CompoundBuffer, payload []byte) (Frame, error) {
+	_ = bs.ToSlice().CopyTo(payload)
 	bs.Free()
 	if fh.StreamID == 0 {
 		countError("frame_priority_zero_stream")
@@ -1238,8 +1265,8 @@ type RSTStreamFrame struct {
 	ErrCode http2.ErrCode
 }
 
-func parseRSTStreamFrame(_ *frameCache, fh FrameHeader, countError func(string), bs mem.BufferSlice) (Frame, error) {
-	p := bs.Materialize()
+func parseRSTStreamFrame(_ *frameCache, fh FrameHeader, countError func(string), bs *mem.CompoundBuffer, p []byte) (Frame, error) {
+	_ = bs.ToSlice().CopyTo(p)
 	bs.Free()
 	if len(p) != 4 {
 		countError("frame_rststream_bad_len")
@@ -1272,8 +1299,8 @@ type ContinuationFrame struct {
 	headerFragBuf []byte
 }
 
-func parseContinuationFrame(_ *frameCache, fh FrameHeader, countError func(string), bs mem.BufferSlice) (Frame, error) {
-	p := bs.Materialize()
+func parseContinuationFrame(_ *frameCache, fh FrameHeader, countError func(string), bs *mem.CompoundBuffer, p []byte) (Frame, error) {
+	_ = bs.ToSlice().CopyTo(p)
 	bs.Free()
 	if fh.StreamID == 0 {
 		countError("frame_continuation_zero_stream")
@@ -1325,8 +1352,8 @@ func (f *PushPromiseFrame) HeadersEnded() bool {
 	return f.FrameHeader.Flags.Has(FlagPushPromiseEndHeaders)
 }
 
-func parsePushPromise(_ *frameCache, fh FrameHeader, countError func(string), bs mem.BufferSlice) (_ Frame, err error) {
-	p := bs.Materialize()
+func parsePushPromise(_ *frameCache, fh FrameHeader, countError func(string), bs *mem.CompoundBuffer, p []byte) (_ Frame, err error) {
+	_ = bs.ToSlice().CopyTo(p)
 	bs.Free()
 	pp := &PushPromiseFrame{
 		FrameHeader: fh,
