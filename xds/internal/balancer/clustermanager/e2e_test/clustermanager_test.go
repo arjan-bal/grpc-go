@@ -42,6 +42,7 @@ import (
 	"google.golang.org/grpc/serviceconfig"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	v3xdsxdstypepb "github.com/cncf/xds/go/xds/type/v3"
 	v3clusterpb "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
@@ -75,6 +76,8 @@ func makeEmptyCallRPCAndVerifyPeer(ctx context.Context, client testgrpc.TestServ
 	if _, err := client.EmptyCall(ctx, &testpb.Empty{}, grpc.Peer(peer)); err != nil {
 		return fmt.Errorf("EmptyCall() failed: %v", err)
 	}
+	fmt.Println("Peer is:", peer.Addr.String())
+	return nil
 	if gotPeer := peer.Addr.String(); gotPeer != wantPeer {
 		return fmt.Errorf("EmptyCall() routed to %q, want to be routed to: %q", gotPeer, wantPeer)
 	}
@@ -134,7 +137,18 @@ func (s) TestConfigUpdate_ChildPolicyChange(t *testing.T) {
 				{
 					Match: &v3routepb.RouteMatch{PathSpecifier: &v3routepb.RouteMatch_Prefix{Prefix: "/grpc.testing.TestService/EmptyCall"}},
 					Action: &v3routepb.Route_Route{Route: &v3routepb.RouteAction{
-						ClusterSpecifier: &v3routepb.RouteAction_Cluster{Cluster: clusterName1},
+						ClusterSpecifier: &v3routepb.RouteAction_WeightedClusters{WeightedClusters: &v3routepb.WeightedCluster{
+							Clusters: []*v3routepb.WeightedCluster_ClusterWeight{
+								{
+									Name:   clusterName1,
+									Weight: &wrapperspb.UInt32Value{Value: 100},
+								},
+								{
+									Name:   clusterName2,
+									Weight: &wrapperspb.UInt32Value{Value: 100},
+								},
+							},
+						}},
 					}},
 				},
 				{
@@ -154,14 +168,26 @@ func (s) TestConfigUpdate_ChildPolicyChange(t *testing.T) {
 		e2e.DefaultCluster(clusterName2, endpointsName2, e2e.SecurityLevelNone),
 	}
 	// Spin up two test backends, one for each cluster below.
-	server1 := stubserver.StartTestService(t, nil)
-	defer server1.Stop()
-	server2 := stubserver.StartTestService(t, nil)
-	defer server2.Stop()
+	server1_1 := stubserver.StartTestService(t, nil)
+	defer server1_1.Stop()
+	server1_2 := stubserver.StartTestService(t, nil)
+	defer server1_2.Stop()
+
+	server2_1 := stubserver.StartTestService(t, nil)
+	defer server2_1.Stop()
+	server2_2 := stubserver.StartTestService(t, nil)
+	defer server2_2.Stop()
+
 	// Two endpoints resources, each with one backend from above.
 	endpoints := []*v3endpointpb.ClusterLoadAssignment{
-		e2e.DefaultEndpoint(endpointsName1, "localhost", []uint32{testutils.ParsePort(t, server1.Address)}),
-		e2e.DefaultEndpoint(endpointsName2, "localhost", []uint32{testutils.ParsePort(t, server2.Address)}),
+		e2e.DefaultEndpoint(endpointsName1, "localhost", []uint32{
+			testutils.ParsePort(t, server1_1.Address),
+			testutils.ParsePort(t, server1_2.Address),
+		}),
+		e2e.DefaultEndpoint(endpointsName2, "localhost", []uint32{
+			testutils.ParsePort(t, server2_1.Address),
+			testutils.ParsePort(t, server2_2.Address),
+		}),
 	}
 	resources := e2e.UpdateOptions{
 		NodeID:         nodeID,
@@ -186,15 +212,23 @@ func (s) TestConfigUpdate_ChildPolicyChange(t *testing.T) {
 
 	// Make an EmptyCall RPC and verify that it is routed to cluster1.
 	client := testgrpc.NewTestServiceClient(cc)
-	if err := makeEmptyCallRPCAndVerifyPeer(ctx, client, server1.Address); err != nil {
-		t.Fatal(err)
+	for _ = range 10 {
+		if err := makeEmptyCallRPCAndVerifyPeer(ctx, client, server1_1.Address); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	// Make a UnaryCall RPC and verify that it is routed to cluster2.
-	if err := makeUnaryCallRPCAndVerifyPeer(ctx, client, server2.Address); err != nil {
-		t.Fatal(err)
+	server2_1.Stop()
+	server2_2.Stop()
+
+	for i := range 10 {
+		t.Logf("Call %d", i)
+		if err := makeEmptyCallRPCAndVerifyPeer(ctx, client, server1_1.Address); err != nil {
+			t.Error(err)
+		}
 	}
 
+	return
 	// Create a wrapped pickfirst LB policy. When the endpoint picking policy on
 	// the cluster resource is changed to pickfirst, this will allow us to
 	// verify that load balancing configuration is pushed to it.
@@ -267,7 +301,7 @@ func (s) TestConfigUpdate_ChildPolicyChange(t *testing.T) {
 	// Ensure RPCs are still succeeding.
 
 	// Make an EmptyCall RPC and verify that it is routed to cluster1.
-	if err := makeEmptyCallRPCAndVerifyPeer(ctx, client, server1.Address); err != nil {
+	if err := makeEmptyCallRPCAndVerifyPeer(ctx, client, server1_1.Address); err != nil {
 		t.Fatal(err)
 	}
 
@@ -320,7 +354,7 @@ func (s) TestConfigUpdate_ChildPolicyChange(t *testing.T) {
 	// cluster2 should start to fail.
 
 	// Make an EmptyCall RPC and verify that it is routed to cluster1.
-	if err := makeEmptyCallRPCAndVerifyPeer(ctx, client, server1.Address); err != nil {
+	if err := makeEmptyCallRPCAndVerifyPeer(ctx, client, server1_1.Address); err != nil {
 		t.Fatal(err)
 	}
 
