@@ -113,7 +113,7 @@ type MetricsReporter interface {
 	// RegisterBatchCallback registers a callback to produce metric values for
 	// only the listed descriptors. The returned function must be called when no
 	// the metrics are no longer needed, which will remove the callback.
-	RegisterBatchCallback(callback Callback, metric ...any) (Unregister, error)
+	RegisterBatchCallback(callback Callback, metric ...any) func()
 }
 
 // Callback is a function registered with a MetricsReporterr that records metrics
@@ -126,11 +126,6 @@ type MetricsReporter interface {
 //
 // The function needs to be concurrent safe.
 type Callback func(AsyncMetricsReporter) error
-
-// Unregister removes the callback registration from a MetricsReporter.
-//
-// This method needs to be idempotent and concurrent safe.
-type Unregister func() error
 
 // AsyncMetricsReporter is a recorder for async metrics.
 type AsyncMetricsReporter interface {

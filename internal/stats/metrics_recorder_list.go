@@ -17,7 +17,6 @@
 package stats
 
 import (
-	"errors"
 	"fmt"
 
 	estats "google.golang.org/grpc/experimental/stats"
@@ -106,14 +105,13 @@ func (l *MetricsRecorderList) RecordInt64Gauge(handle *estats.Int64GaugeHandle, 
 }
 
 // RegisterBatchCallback TODO
-func (l *MetricsRecorderList) RegisterBatchCallback(callback estats.Callback, descriptors ...*estats.MetricDescriptor) (estats.Unregister, error) {
+func (l *MetricsRecorderList) RegisterBatchCallback(callback estats.Callback, descriptors ...*estats.MetricDescriptor) func() {
 	for _, desc := range descriptors {
 		if got, want := desc.Type, estats.MetricTypeIntAsyncGauge; got != want {
 			panic(fmt.Sprintf("Received synchronous metric %q of type %v in call to register callback, but expected async metrics of type %v.", desc.Name, got, want))
 		}
 	}
-	unregisterFns := make([]func() error, 0, len(l.metricsRecorders))
-	var returnError error
+	unregisterFns := make([]func(), 0, len(l.metricsRecorders))
 
 	for _, mr := range l.metricsRecorders {
 		wrappedCallback := func(recorder estats.AsyncMetricsRecorder) error {
@@ -122,28 +120,14 @@ func (l *MetricsRecorderList) RegisterBatchCallback(callback estats.Callback, de
 			}
 			return callback(wrappedRecorder)
 		}
-		fn, err := mr.RegisterBatchCallback(wrappedCallback, descriptors...)
-		returnError = errors.Join(returnError, err)
-		if err != nil {
-			break
-		}
-		unregisterFns = append(unregisterFns, fn)
+		unregisterFns = append(unregisterFns, mr.RegisterBatchCallback(wrappedCallback, descriptors...))
 	}
 
-	if returnError != nil {
+	return func() {
 		for _, fn := range unregisterFns {
 			fn()
 		}
-		return nil, returnError
 	}
-
-	return func() error {
-		var err error
-		for _, fn := range unregisterFns {
-			err = errors.Join(err, fn())
-		}
-		return err
-	}, nil
 }
 
 type asyncRecorderWrapper struct {

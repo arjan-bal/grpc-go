@@ -450,7 +450,7 @@ func (rm *registryMetrics) RecordInt64Gauge(handle *estats.Int64GaugeHandle, inc
 	}
 }
 
-func (rm *registryMetrics) RegisterBatchCallback(callback estats.Callback, descriptors ...*estats.MetricDescriptor) (estats.Unregister, error) {
+func (rm *registryMetrics) RegisterBatchCallback(callback estats.Callback, descriptors ...*estats.MetricDescriptor) func() {
 	observables := make([]otelmetric.Observable, 0, len(descriptors))
 	observableMap := make(map[*estats.MetricDescriptor]otelmetric.Observable, len(descriptors))
 	for _, desc := range descriptors {
@@ -474,11 +474,14 @@ func (rm *registryMetrics) RegisterBatchCallback(callback estats.Callback, descr
 	}
 	reg, err := rm.meter.RegisterCallback(cbWrapper.observe, observables...)
 	if err != nil {
-		return nil, err
+		logger.Errorf("Failed to register callback: %v", err)
+		return func() {}
 	}
-	return func() error {
-		return reg.Unregister()
-	}, nil
+	return func() {
+		if err := reg.Unregister(); err != nil {
+			logger.Errorf("Failed to unregister callback: %v", err)
+		}
+	}
 }
 
 type observerAdapter struct {

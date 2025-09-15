@@ -179,7 +179,7 @@ type dataCache struct {
 	grpcTarget                string
 	uuid                      string
 	metricsRecorder           estats.MetricsRecorder
-	unregisterMetricsCallback func() error
+	unregisterMetricsCallback func()
 }
 
 func newDataCache(size int64, logger *internalgrpclog.PrefixLogger, metricsRecorder estats.MetricsRecorder, grpcTarget string) *dataCache {
@@ -193,16 +193,11 @@ func newDataCache(size int64, logger *internalgrpclog.PrefixLogger, metricsRecor
 		uuid:            uuid.New().String(),
 		metricsRecorder: metricsRecorder,
 	}
-	unregisterMetricsCallback, err := metricsRecorder.RegisterBatchCallback(func(amr estats.AsyncMetricsRecorder) error {
+	dc.unregisterMetricsCallback = metricsRecorder.RegisterBatchCallback(func(amr estats.AsyncMetricsRecorder) error {
 		fmt.Println("Recording metric", dc.currentSize.Load(), dc.grpcTarget, dc.rlsServerTarget, dc.uuid)
 		cacheSizeMetric.Record(amr, dc.currentSize.Load(), dc.grpcTarget, dc.rlsServerTarget, dc.uuid)
 		return nil
 	}, (*estats.MetricDescriptor)(cacheSizeMetric))
-	if err != nil {
-		fmt.Println("Failed to register callback for recording metrics, metrics will not be recorded", err)
-	} else {
-		dc.unregisterMetricsCallback = unregisterMetricsCallback
-	}
 	return dc
 }
 

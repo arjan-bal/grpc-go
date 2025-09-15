@@ -137,9 +137,9 @@ func toDescriptor(metric any) *stats.MetricDescriptor {
 	}
 }
 
-func (mr *metricsReporter) RegisterBatchCallback(callback clients.Callback, metrics ...any) (clients.Unregister, error) {
+func (mr *metricsReporter) RegisterBatchCallback(callback clients.Callback, metrics ...any) func() {
 	if mr.recorder != nil {
-		return func() error { return nil }, nil
+		return func() {}
 	}
 	descriptors := make([]*stats.MetricDescriptor, 0, len(metrics))
 	for _, m := range metrics {
@@ -155,8 +155,7 @@ func (mr *metricsReporter) RegisterBatchCallback(callback clients.Callback, metr
 		}
 		return callback(wrapper)
 	}
-	unreg, err := mr.recorder.RegisterBatchCallback(cbWrapper, descriptors...)
-	return func() error { return unreg() }, err
+	return mr.recorder.RegisterBatchCallback(cbWrapper, descriptors...)
 }
 
 type asyncMetricsReporter struct {

@@ -40,14 +40,10 @@ type MetricsRecorder interface {
 	RecordInt64Gauge(handle *Int64GaugeHandle, value int64, labels ...string)
 	// RegisterBatchCallback registers a callback to produce metric values for
 	// only the listed descriptors. The returned function must be called when no
-	// the metrics are no longer needed, which will remove the callback.
-	RegisterBatchCallback(callback Callback, descriptors ...*MetricDescriptor) (Unregister, error)
+	// the metrics are no longer needed, which will remove the callback. The
+	// returned method needs to be idempotent and concurrent safe.
+	RegisterBatchCallback(callback Callback, descriptors ...*MetricDescriptor) func()
 }
-
-// Unregister removes the callback registration from a MetricsRecorder.
-//
-// This method needs to be idempotent and concurrent safe.
-type Unregister func() error
 
 // Callback is a function registered with a MetricsRecorder that records metrics
 // asynchronously for the set of descriptors it is registered with. The
