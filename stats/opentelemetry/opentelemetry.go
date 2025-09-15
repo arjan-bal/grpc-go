@@ -404,7 +404,7 @@ func (rm *registryMetrics) registerMetrics(metrics *stats.MetricSet, meter otelm
 			rm.floatHistos[desc] = createFloat64Histogram(metrics.Metrics(), desc.Name, meter, otelmetric.WithUnit(desc.Unit), otelmetric.WithDescription(desc.Description), otelmetric.WithExplicitBucketBoundaries(desc.Bounds...))
 		case estats.MetricTypeIntGauge:
 			rm.intGauges[desc] = createInt64Gauge(metrics.Metrics(), desc.Name, meter, otelmetric.WithUnit(desc.Unit), otelmetric.WithDescription(desc.Description))
-		case estats.MetricTypeAsyncIntGauge:
+		case estats.MetricTypeIntAsyncGauge:
 			rm.observableIntGauges[desc] = createInt64ObservableGauge(metrics.Metrics(), desc.Name, meter, otelmetric.WithUnit(desc.Unit), otelmetric.WithDescription(desc.Description))
 		}
 	}
@@ -454,7 +454,7 @@ func (rm *registryMetrics) RegisterBatchCallback(callback estats.Callback, descr
 	observables := make([]otelmetric.Observable, 0, len(descriptors))
 	observableMap := make(map[*estats.MetricDescriptor]otelmetric.Observable, len(descriptors))
 	for _, desc := range descriptors {
-		if desc.Type == estats.MetricTypeAsyncIntGauge {
+		if desc.Type == estats.MetricTypeIntAsyncGauge {
 			if obs, ok := rm.observableIntGauges[desc]; ok {
 				observables = append(observables, obs)
 				observableMap[desc] = obs

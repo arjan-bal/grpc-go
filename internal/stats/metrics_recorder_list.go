@@ -108,7 +108,7 @@ func (l *MetricsRecorderList) RecordInt64Gauge(handle *estats.Int64GaugeHandle, 
 // RegisterBatchCallback TODO
 func (l *MetricsRecorderList) RegisterBatchCallback(callback estats.Callback, descriptors ...*estats.MetricDescriptor) (estats.Unregister, error) {
 	for _, desc := range descriptors {
-		if got, want := desc.Type, estats.MetricTypeAsyncIntGauge; got != want {
+		if got, want := desc.Type, estats.MetricTypeIntAsyncGauge; got != want {
 			panic(fmt.Sprintf("Received synchronous metric %q of type %v in call to register callback, but expected async metrics of type %v.", desc.Name, got, want))
 		}
 	}

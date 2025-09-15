@@ -75,7 +75,7 @@ const (
 	MetricTypeIntHisto
 	MetricTypeFloatHisto
 	MetricTypeIntGauge
-	MetricTypeAsyncIntGauge
+	MetricTypeIntAsyncGauge
 )
 
 // Int64CountHandle is a typed handle for a int count metric. This handle
@@ -160,7 +160,7 @@ func (h *Int64GaugeHandle) Record(recorder MetricsRecorder, incr int64, labels .
 type Int64AsyncGaugeHandle MetricDescriptor
 
 // Descriptor returns the int64 gauge handle typecast to a pointer to a
-// AsyncMetricDescriptor.
+// MetricDescriptor.
 func (h *Int64AsyncGaugeHandle) Descriptor() *MetricDescriptor {
 	return (*MetricDescriptor)(h)
 }
@@ -273,7 +273,7 @@ func RegisterInt64Gauge(descriptor MetricDescriptor) *Int64GaugeHandle {
 // registered with the same name, this function will panic.
 func RegisterInt64AsyncGauge(descriptor MetricDescriptor) *Int64AsyncGaugeHandle {
 	registerMetric(descriptor.Name, descriptor.Default)
-	descriptor.Type = MetricTypeAsyncIntGauge
+	descriptor.Type = MetricTypeIntAsyncGauge
 	descPtr := &descriptor
 	metricsRegistry[descriptor.Name] = descPtr
 	return (*Int64AsyncGaugeHandle)(descPtr)
