@@ -106,17 +106,20 @@ func (l *MetricsRecorderList) RecordInt64Gauge(handle *estats.Int64GaugeHandle, 
 
 // RegisterBatchCallback TODO
 func (l *MetricsRecorderList) RegisterBatchCallback(callback estats.Callback, descriptors ...*estats.MetricDescriptor) func() {
+	descriptorsMap := make(map[*estats.MetricDescriptor]bool, len(descriptors))
 	for _, desc := range descriptors {
 		if got, want := desc.Type, estats.MetricTypeIntAsyncGauge; got != want {
 			panic(fmt.Sprintf("Received synchronous metric %q of type %v in call to register callback, but expected async metrics of type %v.", desc.Name, got, want))
 		}
+		descriptorsMap[desc] = true
 	}
 	unregisterFns := make([]func(), 0, len(l.metricsRecorders))
 
 	for _, mr := range l.metricsRecorders {
 		wrappedCallback := func(recorder estats.AsyncMetricsRecorder) error {
 			wrappedRecorder := &asyncRecorderWrapper{
-				delegate: recorder,
+				delegate:    recorder,
+				descriptors: descriptorsMap,
 			}
 			return callback(wrappedRecorder)
 		}
@@ -131,12 +134,17 @@ func (l *MetricsRecorderList) RegisterBatchCallback(callback estats.Callback, de
 }
 
 type asyncRecorderWrapper struct {
-	delegate estats.AsyncMetricsRecorder
+	delegate    estats.AsyncMetricsRecorder
+	descriptors map[*estats.MetricDescriptor]bool
 }
 
 // RecordIntAsync64Gauge records the measurement alongside labels on the int
 // gauge associated with the provided handle.
 func (w *asyncRecorderWrapper) RecordInt64Gauge(handle *estats.Int64AsyncGaugeHandle, value int64, labels ...string) {
-	verifyLabels(handle.Descriptor(), labels...)
+	d := handle.Descriptor()
+	if _, ok := w.descriptors[d]; !ok {
+		return
+	}
+	verifyLabels(d, labels...)
 	w.delegate.RecordInt64Gauge(handle, value, labels...)
 }

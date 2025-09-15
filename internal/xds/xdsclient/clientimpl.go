@@ -166,10 +166,6 @@ type asyncMetricsReporter struct {
 // RecordIntAsync64Gauge records the measurement alongside labels on the int
 // gauge associated with the provided handle.
 func (mr *asyncMetricsReporter) ReportMetric(metric any) {
-	desc := toDescriptor(metric)
-	if desc == nil {
-		return
-	}
 	switch m := metric.(type) {
 	case *metrics.SomeGauge:
 		xdsClientSomeGaugeMetric.Record(mr.delegate, m.Value, mr.target, m.ServerURI)
