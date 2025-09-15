@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/experimental/stats"
 	estats "google.golang.org/grpc/experimental/stats"
 	"google.golang.org/grpc/internal/backoff"
 	"google.golang.org/grpc/internal/grpclog"
@@ -75,6 +76,13 @@ var (
 		Labels:      []string{"grpc.target", "grpc.xds.server"},
 		Default:     false,
 	})
+	xdsClientSomeGaugeMetric = estats.RegisterInt64AsyncGauge(estats.MetricDescriptor{
+		Name:        "grpc.xds_client.some_gauge",
+		Description: "A test async gauge metric",
+		Unit:        "{value}",
+		Labels:      []string{"grpc.target", "grpc.xds.server"},
+		Default:     false,
+	})
 )
 
 // clientImpl embed xdsclient.XDSClient and implement internal XDSClient
@@ -117,6 +125,57 @@ func (mr *metricsReporter) ReportMetric(metric any) {
 		xdsClientResourceUpdatesInvalidMetric.Record(mr.recorder, 1, mr.target, m.ServerURI, m.ResourceType)
 	case *metrics.ServerFailure:
 		xdsClientServerFailureMetric.Record(mr.recorder, 1, mr.target, m.ServerURI)
+	}
+}
+
+func toDescriptor(metric any) *stats.MetricDescriptor {
+	switch metric.(type) {
+	case *metrics.SomeGauge:
+		return xdsClientSomeGaugeMetric.Descriptor()
+	default:
+		return nil
+	}
+}
+
+func (mr *metricsReporter) RegisterBatchCallback(callback clients.Callback, metrics ...any) (clients.Unregister, error) {
+	if mr.recorder != nil {
+		return func() error { return nil }, nil
+	}
+	descriptors := make([]*stats.MetricDescriptor, 0, len(metrics))
+	for _, m := range metrics {
+		d := toDescriptor(m)
+		if d != nil {
+			descriptors = append(descriptors, d)
+		}
+	}
+	cbWrapper := func(r estats.AsyncMetricsRecorder) error {
+		wrapper := &asyncMetricsReporter{
+			target:   mr.target,
+			delegate: r,
+		}
+		return callback(wrapper)
+	}
+	unreg, err := mr.recorder.RegisterBatchCallback(cbWrapper, descriptors...)
+	return func() error { return unreg() }, err
+}
+
+type asyncMetricsReporter struct {
+	target   string
+	delegate estats.AsyncMetricsRecorder
+}
+
+// RecordIntAsync64Gauge records the measurement alongside labels on the int
+// gauge associated with the provided handle.
+func (mr *asyncMetricsReporter) ReportMetric(metric any) {
+	desc := toDescriptor(metric)
+	if desc == nil {
+		return
+	}
+	switch m := metric.(type) {
+	case *metrics.SomeGauge:
+		xdsClientSomeGaugeMetric.Record(mr.delegate, m.Value, mr.target, m.ServerURI)
+	default:
+		return
 	}
 }
 

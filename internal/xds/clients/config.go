@@ -109,4 +109,35 @@ type MetricsReporter interface {
 	// Each client will produce different metrics. Please see the client's
 	// documentation for a list of possible metrics events.
 	ReportMetric(metric any)
+
+	// RegisterBatchCallback registers a callback to produce metric values for
+	// only the listed descriptors. The returned function must be called when no
+	// the metrics are no longer needed, which will remove the callback.
+	RegisterBatchCallback(callback Callback, metric ...any) (Unregister, error)
+}
+
+// Callback is a function registered with a MetricsReporterr that records metrics
+// asynchronously for the set of metrics it is registered with. The
+// AsyncMetricsReporter parameter is used to record values for these metrics.
+//
+// The function needs to make unique recording across all registered
+// Callbacks. Meaning, it should not report values for a metric with the same
+// attributes as another Callback will report.
+//
+// The function needs to be concurrent safe.
+type Callback func(AsyncMetricsReporter) error
+
+// Unregister removes the callback registration from a MetricsReporter.
+//
+// This method needs to be idempotent and concurrent safe.
+type Unregister func() error
+
+// AsyncMetricsReporter is a recorder for async metrics.
+type AsyncMetricsReporter interface {
+	// ReportMetric reports a metric. The metric will be one of the predefined
+	// set of types depending on the client (XDSClient or LRSClient).
+	//
+	// Each client will produce different metrics. Please see the client's
+	// documentation for a list of possible metrics events.
+	ReportMetric(metric any)
 }

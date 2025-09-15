@@ -40,3 +40,8 @@ type ResourceUpdateInvalid struct {
 type ServerFailure struct {
 	ServerURI string
 }
+
+type SomeGauge struct {
+	Value     int64
+	ServerURI string
+}
