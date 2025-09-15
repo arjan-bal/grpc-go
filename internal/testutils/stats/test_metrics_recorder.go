@@ -258,6 +258,11 @@ func (r *TestMetricsRecorder) RecordInt64Gauge(handle *estats.Int64GaugeHandle, 
 	r.data[handle.Name] = float64(incr)
 }
 
+// RegisterBatchCallback is a noop implementation of RegisterBatchCallback.
+func (r *TestMetricsRecorder) RegisterBatchCallback(estats.Callback, ...*estats.MetricDescriptor) (estats.Unregister, error) {
+	return func() error { return nil }, nil
+}
+
 // To implement a stats.Handler, which allows it to be set as a dial option:
 
 // TagRPC is TestMetricsRecorder's implementation of TagRPC.
@@ -294,3 +299,8 @@ func (r *NoopMetricsRecorder) RecordFloat64Histo(*estats.Float64HistoHandle, flo
 
 // RecordInt64Gauge is a noop implementation of RecordInt64Gauge.
 func (r *NoopMetricsRecorder) RecordInt64Gauge(*estats.Int64GaugeHandle, int64, ...string) {}
+
+// RegisterBatchCallback is a noop implementation of RegisterBatchCallback.
+func (r *NoopMetricsRecorder) RegisterBatchCallback(estats.Callback, ...*estats.MetricDescriptor) (estats.Unregister, error) {
+	return func() error { return nil }, nil
+}

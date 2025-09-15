@@ -86,7 +86,7 @@ var (
 		Labels:      []string{"grpc.target", "grpc.lb.rls.server_target", "grpc.lb.rls.instance_uuid"},
 		Default:     false,
 	})
-	cacheSizeMetric = estats.RegisterInt64Gauge(estats.MetricDescriptor{
+	cacheSizeMetric = estats.RegisterInt64AsyncGauge(estats.MetricDescriptor{
 		Name:        "grpc.lb.rls.cache_size",
 		Description: "EXPERIMENTAL. The current size of the RLS cache.",
 		Unit:        "By",

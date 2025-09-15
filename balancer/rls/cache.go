@@ -20,6 +20,8 @@ package rls
 
 import (
 	"container/list"
+	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -165,22 +167,23 @@ func (l *lru) getLeastRecentlyUsed() cacheKey {
 //
 // It is not safe for concurrent access.
 type dataCache struct {
-	maxSize         int64 // Maximum allowed size.
-	currentSize     int64 // Current size.
-	keys            *lru  // Cache keys maintained in lru order.
+	maxSize         int64        // Maximum allowed size.
+	currentSize     atomic.Int64 // Current size.
+	keys            *lru         // Cache keys maintained in lru order.
 	entries         map[cacheKey]*cacheEntry
 	logger          *internalgrpclog.PrefixLogger
 	shutdown        *grpcsync.Event
 	rlsServerTarget string
 
 	// Read only after initialization.
-	grpcTarget      string
-	uuid            string
-	metricsRecorder estats.MetricsRecorder
+	grpcTarget                string
+	uuid                      string
+	metricsRecorder           estats.MetricsRecorder
+	unregisterMetricsCallback func() error
 }
 
 func newDataCache(size int64, logger *internalgrpclog.PrefixLogger, metricsRecorder estats.MetricsRecorder, grpcTarget string) *dataCache {
-	return &dataCache{
+	dc := &dataCache{
 		maxSize:         size,
 		keys:            newLRU(),
 		entries:         make(map[cacheKey]*cacheEntry),
@@ -190,6 +193,17 @@ func newDataCache(size int64, logger *internalgrpclog.PrefixLogger, metricsRecor
 		uuid:            uuid.New().String(),
 		metricsRecorder: metricsRecorder,
 	}
+	unregisterMetricsCallback, err := metricsRecorder.RegisterBatchCallback(func(amr estats.AsyncMetricsRecorder) error {
+		fmt.Println("Recording metric", dc.currentSize.Load(), dc.grpcTarget, dc.rlsServerTarget, dc.uuid)
+		cacheSizeMetric.Record(amr, dc.currentSize.Load(), dc.grpcTarget, dc.rlsServerTarget, dc.uuid)
+		return nil
+	}, (*estats.MetricDescriptor)(cacheSizeMetric))
+	if err != nil {
+		fmt.Println("Failed to register callback for recording metrics, metrics will not be recorded", err)
+	} else {
+		dc.unregisterMetricsCallback = unregisterMetricsCallback
+	}
+	return dc
 }
 
 // updateRLSServerTarget updates the RLS Server Target the RLS Balancer is
@@ -210,7 +224,7 @@ func (dc *dataCache) resize(size int64) (backoffCancelled bool) {
 	}
 
 	backoffCancelled = false
-	for dc.currentSize > size {
+	for dc.currentSize.Load() > size {
 		key := dc.keys.getLeastRecentlyUsed()
 		entry, ok := dc.entries[key]
 		if !ok {
@@ -320,14 +334,13 @@ func (dc *dataCache) addEntry(key cacheKey, entry *cacheEntry) (backoffCancelled
 		return false, false
 	}
 	dc.entries[key] = entry
-	dc.currentSize += entry.size
+	cacheSize := dc.currentSize.Add(entry.size)
 	dc.keys.addEntry(key)
 	// If the new entry makes the cache go over its configured size, remove some
 	// old entries.
-	if dc.currentSize > dc.maxSize {
+	if cacheSize > dc.maxSize {
 		backoffCancelled = dc.resize(dc.maxSize)
 	}
-	cacheSizeMetric.Record(dc.metricsRecorder, dc.currentSize, dc.grpcTarget, dc.rlsServerTarget, dc.uuid)
 	cacheEntriesMetric.Record(dc.metricsRecorder, int64(len(dc.entries)), dc.grpcTarget, dc.rlsServerTarget, dc.uuid)
 	return backoffCancelled, true
 }
@@ -335,10 +348,8 @@ func (dc *dataCache) addEntry(key cacheKey, entry *cacheEntry) (backoffCancelled
 // updateEntrySize updates the size of a cache entry and the current size of the
 // data cache. An entry's size can change upon receipt of an RLS response.
 func (dc *dataCache) updateEntrySize(entry *cacheEntry, newSize int64) {
-	dc.currentSize -= entry.size
+	dc.currentSize.Add(newSize - entry.size)
 	entry.size = newSize
-	dc.currentSize += entry.size
-	cacheSizeMetric.Record(dc.metricsRecorder, dc.currentSize, dc.grpcTarget, dc.rlsServerTarget, dc.uuid)
 }
 
 func (dc *dataCache) getEntry(key cacheKey) *cacheEntry {
@@ -369,15 +380,17 @@ func (dc *dataCache) removeEntryForTesting(key cacheKey) {
 // - the key is removed from the LRU
 func (dc *dataCache) deleteAndCleanup(key cacheKey, entry *cacheEntry) {
 	delete(dc.entries, key)
-	dc.currentSize -= entry.size
+	dc.currentSize.Add(-entry.size)
 	dc.keys.removeEntry(key)
-	cacheSizeMetric.Record(dc.metricsRecorder, dc.currentSize, dc.grpcTarget, dc.rlsServerTarget, dc.uuid)
 	cacheEntriesMetric.Record(dc.metricsRecorder, int64(len(dc.entries)), dc.grpcTarget, dc.rlsServerTarget, dc.uuid)
 }
 
 func (dc *dataCache) stop() {
 	for key, entry := range dc.entries {
 		dc.deleteAndCleanup(key, entry)
+	}
+	if dc.unregisterMetricsCallback != nil {
+		dc.unregisterMetricsCallback()
 	}
 	dc.shutdown.Fire()
 }

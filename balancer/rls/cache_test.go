@@ -177,7 +177,7 @@ func (s) TestDataCache_Resize(t *testing.T) {
 	if dc.resize(1) {
 		t.Fatalf("dataCache.resize() returned true, want false")
 	}
-	if dc.currentSize != 5 {
+	if dc.currentSize.Load() != 5 {
 		t.Fatalf("dataCache.size is %d, want 5", dc.currentSize)
 	}
 
@@ -187,7 +187,7 @@ func (s) TestDataCache_Resize(t *testing.T) {
 	if !dc.resize(1) {
 		t.Fatalf("dataCache.resize() returned false, want true")
 	}
-	if dc.currentSize != 1 {
+	if dc.currentSize.Load() != 1 {
 		t.Fatalf("dataCache.size is %d, want 1", dc.currentSize)
 	}
 }
@@ -204,7 +204,7 @@ func (s) TestDataCache_EvictExpiredEntries(t *testing.T) {
 	if !dc.evictExpiredEntries() {
 		t.Fatal("dataCache.evictExpiredEntries() returned false, want true")
 	}
-	if dc.currentSize != 3 {
+	if dc.currentSize.Load() != 3 {
 		t.Fatalf("dataCache.size is %d, want 3", dc.currentSize)
 	}
 	for i := 0; i < 3; i++ {

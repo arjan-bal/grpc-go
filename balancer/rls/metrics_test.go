@@ -18,6 +18,7 @@ package rls
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"testing"
 
@@ -38,7 +39,9 @@ import (
 
 func metricsDataFromReader(ctx context.Context, reader *metric.ManualReader) map[string]metricdata.Metrics {
 	rm := &metricdata.ResourceMetrics{}
-	reader.Collect(ctx, rm)
+	if err := reader.Collect(ctx, rm); err != nil {
+		fmt.Println(err)
+	}
 	gotMetrics := map[string]metricdata.Metrics{}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {

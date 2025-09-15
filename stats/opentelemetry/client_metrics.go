@@ -62,6 +62,7 @@ func (h *clientMetricsHandler) initializeMetrics() {
 
 	rm := &registryMetrics{
 		optionalLabels: h.options.MetricsOptions.OptionalLabels,
+		meter:          meter,
 	}
 	h.MetricsRecorder = rm
 	rm.registerMetrics(metrics, meter)

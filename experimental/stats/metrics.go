@@ -37,7 +37,34 @@ type MetricsRecorder interface {
 	RecordFloat64Histo(handle *Float64HistoHandle, incr float64, labels ...string)
 	// RecordInt64Gauge records the measurement alongside labels on the int
 	// gauge associated with the provided handle.
-	RecordInt64Gauge(handle *Int64GaugeHandle, incr int64, labels ...string)
+	RecordInt64Gauge(handle *Int64GaugeHandle, value int64, labels ...string)
+	// RegisterBatchCallback registers a callback to produce metric values for
+	// only the listed descriptors. The returned function must be called when no
+	// the metrics are no longer needed, which will remove the callback.
+	RegisterBatchCallback(callback Callback, descriptors ...*MetricDescriptor) (Unregister, error)
+}
+
+// Unregister removes the callback registration from a MetricsRecorder.
+//
+// This method needs to be idempotent and concurrent safe.
+type Unregister func() error
+
+// Callback is a function registered with a MetricsRecorder that records metrics
+// asynchronously for the set of descriptors it is registered with. The
+// AsyncMetricsRecorder parameter is used to record values for these metrics.
+//
+// The function needs to make unique recording across all registered
+// Callbacks. Meaning, it should not report values for a metric with the same
+// attributes as another Callback will report.
+//
+// The function needs to be concurrent safe.
+type Callback func(AsyncMetricsRecorder) error
+
+// AsyncMetricsRecorder is a recorder for async metrics.
+type AsyncMetricsRecorder interface {
+	// RecordInt64Gauge records the measurement alongside labels on the int
+	// gauge associated with the provided handle.
+	RecordInt64Gauge(handle *Int64AsyncGaugeHandle, value int64, labels ...string)
 }
 
 // Metrics is an experimental legacy alias of the now-stable stats.MetricSet.
