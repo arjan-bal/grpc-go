@@ -128,10 +128,10 @@ func (mr *metricsReporter) ReportMetric(metric any) {
 	}
 }
 
-func toDescriptor(metric any) *stats.MetricDescriptor {
+func toDescriptor(metric any) stats.AsyncMetric {
 	switch metric.(type) {
 	case *metrics.SomeGauge:
-		return xdsClientSomeGaugeMetric.Descriptor()
+		return xdsClientSomeGaugeMetric
 	default:
 		return nil
 	}
@@ -141,7 +141,7 @@ func (mr *metricsReporter) RegisterBatchCallback(callback clients.Callback, metr
 	if mr.recorder != nil {
 		return func() {}
 	}
-	descriptors := make([]*stats.MetricDescriptor, 0, len(metrics))
+	descriptors := make([]stats.AsyncMetric, 0, len(metrics))
 	for _, m := range metrics {
 		d := toDescriptor(m)
 		if d != nil {

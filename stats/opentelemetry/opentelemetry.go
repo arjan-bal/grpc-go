@@ -450,10 +450,11 @@ func (rm *registryMetrics) RecordInt64Gauge(handle *estats.Int64GaugeHandle, inc
 	}
 }
 
-func (rm *registryMetrics) RegisterBatchCallback(callback estats.Callback, descriptors ...*estats.MetricDescriptor) func() {
-	observables := make([]otelmetric.Observable, 0, len(descriptors))
-	observableMap := make(map[*estats.MetricDescriptor]otelmetric.Observable, len(descriptors))
-	for _, desc := range descriptors {
+func (rm *registryMetrics) RegisterBatchCallback(callback estats.Callback, metrics ...estats.AsyncMetric) func() {
+	observables := make([]otelmetric.Observable, 0, len(metrics))
+	observableMap := make(map[*estats.MetricDescriptor]otelmetric.Observable, len(metrics))
+	for _, m := range metrics {
+		desc := m.Descriptor()
 		if desc.Type == estats.MetricTypeIntAsyncGauge {
 			if obs, ok := rm.observableIntGauges[desc]; ok {
 				observables = append(observables, obs)

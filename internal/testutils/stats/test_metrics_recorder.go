@@ -259,7 +259,7 @@ func (r *TestMetricsRecorder) RecordInt64Gauge(handle *estats.Int64GaugeHandle, 
 }
 
 // RegisterBatchCallback is a noop implementation of RegisterBatchCallback.
-func (r *TestMetricsRecorder) RegisterBatchCallback(estats.Callback, ...*estats.MetricDescriptor) func() {
+func (r *TestMetricsRecorder) RegisterBatchCallback(estats.Callback, ...estats.AsyncMetric) func() {
 	return func() {}
 }
 
@@ -301,6 +301,6 @@ func (r *NoopMetricsRecorder) RecordFloat64Histo(*estats.Float64HistoHandle, flo
 func (r *NoopMetricsRecorder) RecordInt64Gauge(*estats.Int64GaugeHandle, int64, ...string) {}
 
 // RegisterBatchCallback is a noop implementation of RegisterBatchCallback.
-func (r *NoopMetricsRecorder) RegisterBatchCallback(estats.Callback, ...*estats.MetricDescriptor) func() {
+func (r *NoopMetricsRecorder) RegisterBatchCallback(estats.Callback, ...estats.AsyncMetric) func() {
 	return func() {}
 }

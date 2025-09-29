@@ -197,7 +197,7 @@ func newDataCache(size int64, logger *internalgrpclog.PrefixLogger, metricsRecor
 		fmt.Println("Recording metric", dc.currentSize.Load(), dc.grpcTarget, dc.rlsServerTarget, dc.uuid)
 		cacheSizeMetric.Record(amr, dc.currentSize.Load(), dc.grpcTarget, dc.rlsServerTarget, dc.uuid)
 		return nil
-	}, (*estats.MetricDescriptor)(cacheSizeMetric))
+	}, cacheSizeMetric)
 	return dc
 }
 

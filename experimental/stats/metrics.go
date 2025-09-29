@@ -42,7 +42,7 @@ type MetricsRecorder interface {
 	// only the listed descriptors. The returned function must be called when no
 	// the metrics are no longer needed, which will remove the callback. The
 	// returned method needs to be idempotent and concurrent safe.
-	RegisterBatchCallback(callback Callback, descriptors ...*MetricDescriptor) func()
+	RegisterBatchCallback(callback Callback, descriptors ...AsyncMetric) func()
 }
 
 // Callback is a function registered with a MetricsRecorder that records metrics

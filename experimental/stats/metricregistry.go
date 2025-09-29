@@ -155,9 +155,17 @@ func (h *Int64GaugeHandle) Record(recorder MetricsRecorder, incr int64, labels .
 	recorder.RecordInt64Gauge(h, incr, labels...)
 }
 
+// AsyncMetric is a marker interface for asynchronous metric types.
+type AsyncMetric interface {
+	isAsync()
+	Descriptor() *MetricDescriptor
+}
+
 // Int64AsyncGaugeHandle is a typed handle for an int gauge metric. This handle is
 // passed at the recording point in order to know which metric to record on.
 type Int64AsyncGaugeHandle MetricDescriptor
+
+func (h *Int64AsyncGaugeHandle) isAsync() {}
 
 // Descriptor returns the int64 gauge handle typecast to a pointer to a
 // MetricDescriptor.
