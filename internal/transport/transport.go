@@ -62,52 +62,53 @@ type recvMsg struct {
 // interface. recvBuffer is written to much more often and using strict recvMsg
 // structs helps avoid allocation in "recvBuffer.put"
 type recvBuffer struct {
-	c       chan recvMsg
-	mu      sync.Mutex
-	backlog []recvMsg
-	err     error
+	c          chan recvMsg
+	mu         sync.Mutex
+	backlog    []recvMsg
+	backlogLen atomic.Int64
+	err        error
 }
 
 // init allows a recvBuffer to be initialized in-place, which is useful
 // for resetting a buffer or for avoiding a heap allocation when the buffer
 // is embedded in another struct.
 func (b *recvBuffer) init() {
-	b.c = make(chan recvMsg, 1)
+	b.c = make(chan recvMsg, 128)
 }
 
 func (b *recvBuffer) put(r recvMsg) {
-	b.mu.Lock()
 	if b.err != nil {
 		// drop the buffer on the floor. Since b.err is not nil, any subsequent reads
 		// will always return an error, making this buffer inaccessible.
 		r.buffer.Free()
-		b.mu.Unlock()
 		// An error had occurred earlier, don't accept more
 		// data or errors.
 		return
 	}
 	b.err = r.err
-	if len(b.backlog) == 0 {
-		select {
-		case b.c <- r:
-			b.mu.Unlock()
-			return
-		default:
-		}
+	select {
+	case b.c <- r:
+		return
+	default:
 	}
+	b.mu.Lock()
 	b.backlog = append(b.backlog, r)
+	b.backlogLen.Add(1)
 	b.mu.Unlock()
 }
 
 func (b *recvBuffer) load() {
+	// Can only increase due to producer.
+	if b.backlogLen.Load() == 0 {
+		return
+	}
 	b.mu.Lock()
-	if len(b.backlog) > 0 {
-		select {
-		case b.c <- b.backlog[0]:
-			b.backlog[0] = recvMsg{}
-			b.backlog = b.backlog[1:]
-		default:
-		}
+	select {
+	case b.c <- b.backlog[0]:
+		b.backlog[0] = recvMsg{}
+		b.backlog = b.backlog[1:]
+		b.backlogLen.Add(-1)
+	default:
 	}
 	b.mu.Unlock()
 }
