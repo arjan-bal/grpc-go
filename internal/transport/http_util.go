@@ -302,6 +302,7 @@ type bufWriter struct {
 	batchSize int
 	conn      net.Conn
 	err       error
+	netBufs   net.Buffers
 }
 
 func newBufWriter(conn net.Conn, batchSize int, pool *sync.Pool) *bufWriter {
@@ -328,6 +329,20 @@ func (w *bufWriter) Write(b []byte) (int, error) {
 	if w.buf == nil {
 		b := w.pool.Get().(*[]byte)
 		w.buf = *b
+	}
+	if w.offset+len(b) >= w.batchSize {
+		w.netBufs = append(w.netBufs[:0], w.buf[:w.offset], b)
+		if _, err := w.netBufs.WriteTo(w.conn); err != nil {
+			panic("Handle this")
+		}
+		w.offset = 0
+		// Only release the buffer if we are in a "shared" mode
+		if w.buf != nil && w.pool != nil {
+			b := w.buf
+			w.pool.Put(&b)
+			w.buf = nil
+		}
+		return len(b), nil
 	}
 	written := 0
 	for len(b) > 0 {
