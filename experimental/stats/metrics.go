@@ -38,23 +38,35 @@ type MetricsRecorder interface {
 	// RecordInt64Gauge records the measurement alongside labels on the int
 	// gauge associated with the provided handle.
 	RecordInt64Gauge(handle *Int64GaugeHandle, value int64, labels ...string)
-	// RegisterBatchCallback registers a callback to produce metric values for
+	// RegisterAsyncReporter registers a reporter to produce metric values for
 	// only the listed descriptors. The returned function must be called when no
-	// the metrics are no longer needed, which will remove the callback. The
+	// the metrics are no longer needed, which will remove the reporter. The
 	// returned method needs to be idempotent and concurrent safe.
-	RegisterBatchCallback(callback Callback, descriptors ...AsyncMetric) func()
+	RegisterAsyncReporter(reporter AsyncMetricReporter, descriptors ...AsyncMetric) func()
 }
 
-// Callback is a function registered with a MetricsRecorder that records metrics
-// asynchronously for the set of descriptors it is registered with. The
-// AsyncMetricsRecorder parameter is used to record values for these metrics.
+// AsyncMetricReporter is an interface for types that record metrics asynchronously
+// for the set of descriptors they are registered with. The AsyncMetricsRecorder
+// parameter is used to record values for these metrics.
 //
-// The function needs to make unique recording across all registered
-// Callbacks. Meaning, it should not report values for a metric with the same
-// attributes as another Callback will report.
+// Implementations must make unique recordings across all registered
+// MetricReporters. Meaning, they should not report values for a metric with
+// the same attributes as another AsyncMetricReporter will report.
 //
-// The function needs to be concurrent safe.
-type Callback func(AsyncMetricsRecorder) error
+// Implementations must be concurrent-safe.
+type AsyncMetricReporter interface {
+	// Report records metric values using the provided recorder.
+	Report(AsyncMetricsRecorder) error
+}
+
+// MetricReporterFunc is an adapter to allow the use of ordinary functions as
+// MetricReporters.
+type MetricReporterFunc func(AsyncMetricsRecorder) error
+
+// Report calls f(r).
+func (f MetricReporterFunc) Report(r AsyncMetricsRecorder) error {
+	return f(r)
+}
 
 // AsyncMetricsRecorder is a recorder for async metrics.
 type AsyncMetricsRecorder interface {

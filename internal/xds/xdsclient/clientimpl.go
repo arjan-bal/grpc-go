@@ -137,7 +137,7 @@ func toDescriptor(metric any) stats.AsyncMetric {
 	}
 }
 
-func (mr *metricsReporter) RegisterBatchCallback(callback clients.Callback, metrics ...any) func() {
+func (mr *metricsReporter) RegisterAsyncReporter(reporter clients.AsyncReporter, metrics ...any) func() {
 	if mr.recorder != nil {
 		return func() {}
 	}
@@ -149,23 +149,23 @@ func (mr *metricsReporter) RegisterBatchCallback(callback clients.Callback, metr
 		}
 	}
 	cbWrapper := func(r estats.AsyncMetricsRecorder) error {
-		wrapper := &asyncMetricsReporter{
+		wrapper := &asyncMetricsRecorder{
 			target:   mr.target,
 			delegate: r,
 		}
-		return callback(wrapper)
+		return reporter.Report(wrapper)
 	}
-	return mr.recorder.RegisterBatchCallback(cbWrapper, descriptors...)
+	return mr.recorder.RegisterAsyncReporter(estats.MetricReporterFunc(cbWrapper), descriptors...)
 }
 
-type asyncMetricsReporter struct {
+type asyncMetricsRecorder struct {
 	target   string
 	delegate estats.AsyncMetricsRecorder
 }
 
 // RecordIntAsync64Gauge records the measurement alongside labels on the int
 // gauge associated with the provided handle.
-func (mr *asyncMetricsReporter) ReportMetric(metric any) {
+func (mr *asyncMetricsRecorder) ReportMetric(metric any) {
 	switch m := metric.(type) {
 	case *metrics.SomeGauge:
 		xdsClientSomeGaugeMetric.Record(mr.delegate, m.Value, mr.target, m.ServerURI)

@@ -211,6 +211,10 @@ type fakeMetricsRecorder struct {
 	floatValues map[*MetricDescriptor]float64
 }
 
+func (f *fakeMetricsRecorder) RegisterAsyncReporter(AsyncMetricReporter, ...AsyncMetric) func() {
+	return func() {}
+}
+
 // newFakeMetricsRecorder returns a fake metrics recorder based off the current
 // state of global metric registry.
 func newFakeMetricsRecorder(t *testing.T) *fakeMetricsRecorder {

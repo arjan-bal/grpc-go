@@ -450,7 +450,7 @@ func (rm *registryMetrics) RecordInt64Gauge(handle *estats.Int64GaugeHandle, inc
 	}
 }
 
-func (rm *registryMetrics) RegisterBatchCallback(callback estats.Callback, metrics ...estats.AsyncMetric) func() {
+func (rm *registryMetrics) RegisterAsyncReporter(reporter estats.AsyncMetricReporter, metrics ...estats.AsyncMetric) func() {
 	observables := make([]otelmetric.Observable, 0, len(metrics))
 	observableMap := make(map[*estats.MetricDescriptor]otelmetric.Observable, len(metrics))
 	for _, m := range metrics {
@@ -469,7 +469,7 @@ func (rm *registryMetrics) RegisterBatchCallback(callback estats.Callback, metri
 				observableMap:  observableMap,
 				delegate:       o,
 			}
-			callback(wrapper)
+			reporter.Report(wrapper)
 			return nil
 		},
 	}

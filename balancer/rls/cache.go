@@ -193,11 +193,12 @@ func newDataCache(size int64, logger *internalgrpclog.PrefixLogger, metricsRecor
 		uuid:            uuid.New().String(),
 		metricsRecorder: metricsRecorder,
 	}
-	dc.unregisterMetricsCallback = metricsRecorder.RegisterBatchCallback(func(amr estats.AsyncMetricsRecorder) error {
+	reporter := func(amr estats.AsyncMetricsRecorder) error {
 		fmt.Println("Recording metric", dc.currentSize.Load(), dc.grpcTarget, dc.rlsServerTarget, dc.uuid)
 		cacheSizeMetric.Record(amr, dc.currentSize.Load(), dc.grpcTarget, dc.rlsServerTarget, dc.uuid)
 		return nil
-	}, cacheSizeMetric)
+	}
+	dc.unregisterMetricsCallback = metricsRecorder.RegisterAsyncReporter(estats.MetricReporterFunc(reporter), cacheSizeMetric)
 	return dc
 }
 

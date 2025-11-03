@@ -110,25 +110,38 @@ type MetricsReporter interface {
 	// documentation for a list of possible metrics events.
 	ReportMetric(metric any)
 
-	// RegisterBatchCallback registers a callback to produce metric values for
+	// RegisterAsyncReporter registers a reporter to produce metric values for
 	// only the listed descriptors. The returned function must be called when no
-	// the metrics are no longer needed, which will remove the callback.
-	RegisterBatchCallback(callback Callback, metric ...any) func()
+	// the metrics are no longer needed, which will remove the reporter. The
+	// returned method needs to be idempotent and concurrent safe.
+	RegisterAsyncReporter(callback AsyncReporter, metric ...any) func()
 }
 
-// Callback is a function registered with a MetricsReporterr that records metrics
-// asynchronously for the set of metrics it is registered with. The
-// AsyncMetricsReporter parameter is used to record values for these metrics.
+// AsyncReporter is an interface for types that record metrics asynchronously
+// for the set of descriptors they are registered with. The AsyncMetricsRecorder
+// parameter is used to record values for these metrics.
 //
-// The function needs to make unique recording across all registered
-// Callbacks. Meaning, it should not report values for a metric with the same
-// attributes as another Callback will report.
+// Implementations must make unique recordings across all registered
+// MetricReporters. Meaning, they should not report values for a metric with
+// the same attributes as another AsyncMetricReporter will report.
 //
-// The function needs to be concurrent safe.
-type Callback func(AsyncMetricsReporter) error
+// Implementations must be concurrent-safe.
+type AsyncReporter interface {
+	// Report records metric values using the provided recorder.
+	Report(AsyncMetricsRecorder) error
+}
 
-// AsyncMetricsReporter is a recorder for async metrics.
-type AsyncMetricsReporter interface {
+// MetricReporterFunc is an adapter to allow the use of ordinary functions as
+// MetricReporters.
+type MetricReporterFunc func(AsyncMetricsRecorder) error
+
+// Report calls f(r).
+func (f MetricReporterFunc) Report(r AsyncMetricsRecorder) error {
+	return f(r)
+}
+
+// AsyncMetricsRecorder is a recorder for async metrics.
+type AsyncMetricsRecorder interface {
 	// ReportMetric reports a metric. The metric will be one of the predefined
 	// set of types depending on the client (XDSClient or LRSClient).
 	//

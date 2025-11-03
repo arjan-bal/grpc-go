@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/internal/grpctest"
+	"google.golang.org/grpc/internal/xds/clients"
 	"google.golang.org/grpc/internal/xds/clients/internal/pretty"
 	"google.golang.org/grpc/internal/xds/clients/internal/testutils"
 	"google.golang.org/grpc/internal/xds/clients/xdsclient"
@@ -283,6 +284,10 @@ func buildResourceName(typeName, auth, id string, ctxParams map[string]string) s
 // have taken place.
 type testMetricsReporter struct {
 	metricsCh *testutils.Channel
+}
+
+func (r *testMetricsReporter) RegisterBatchCallback(clients.Callback, ...any) func() {
+	return func() {}
 }
 
 // newTestMetricsReporter returns a new testMetricsReporter.

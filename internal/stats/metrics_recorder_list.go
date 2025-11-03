@@ -104,14 +104,11 @@ func (l *MetricsRecorderList) RecordInt64Gauge(handle *estats.Int64GaugeHandle, 
 	}
 }
 
-// RegisterBatchCallback TODO
-func (l *MetricsRecorderList) RegisterBatchCallback(callback estats.Callback, metrics ...estats.AsyncMetric) func() {
+// RegisterAsyncReporter TODO
+func (l *MetricsRecorderList) RegisterAsyncReporter(reporter estats.AsyncMetricReporter, metrics ...estats.AsyncMetric) func() {
 	descriptorsMap := make(map[*estats.MetricDescriptor]bool, len(metrics))
 	for _, m := range metrics {
 		desc := m.Descriptor()
-		if got, want := desc.Type, estats.MetricTypeIntAsyncGauge; got != want {
-			panic(fmt.Sprintf("Received synchronous metric %q of type %v in call to register callback, but expected async metrics of type %v.", desc.Name, got, want))
-		}
 		descriptorsMap[desc] = true
 	}
 	unregisterFns := make([]func(), 0, len(l.metricsRecorders))
@@ -122,9 +119,9 @@ func (l *MetricsRecorderList) RegisterBatchCallback(callback estats.Callback, me
 				delegate:    recorder,
 				descriptors: descriptorsMap,
 			}
-			return callback(wrappedRecorder)
+			return reporter.Report(wrappedRecorder)
 		}
-		unregisterFns = append(unregisterFns, mr.RegisterBatchCallback(wrappedCallback, metrics...))
+		unregisterFns = append(unregisterFns, mr.RegisterAsyncReporter(estats.MetricReporterFunc(wrappedCallback), metrics...))
 	}
 
 	return func() {
