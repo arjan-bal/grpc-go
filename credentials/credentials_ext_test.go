@@ -109,6 +109,13 @@ func (s) TestCorrectAuthorityWithCreds(t *testing.T) {
 			},
 			expectedAuth: authority,
 		},
+		{
+			name: "TLSWithPort",
+			creds: func(t *testing.T) (grpc.ServerOption, grpc.DialOption) {
+				return loadTLSCreds(t)
+			},
+			expectedAuth: authority + ":1234",
+		},
 	}
 
 	for _, tt := range tests {
@@ -155,35 +162,52 @@ func (s) TestIncorrectAuthorityWithTLS(t *testing.T) {
 		t.Fatalf("Failed to create credentials %v", err)
 	}
 
-	serverCalled := make(chan struct{})
-	ss := &stubserver.StubServer{
-		EmptyCallF: func(context.Context, *testpb.Empty) (*testpb.Empty, error) {
-			close(serverCalled)
-			return nil, nil
+	tests := []struct {
+		name      string
+		authority string
+	}{
+		{
+			name:      "IncorrectAuthority",
+			authority: "auth.example.com",
+		},
+		{
+			name:      "IncorrectAuthorityWithPort",
+			authority: "auth.example.com:1234",
 		},
 	}
-	if err := ss.StartServer(grpc.Creds(credentials.NewServerTLSFromCert(&cert))); err != nil {
-		t.Fatalf("Error starting endpoint server: %v", err)
-	}
-	defer ss.Stop()
 
-	cc, err := grpc.NewClient(ss.Address, grpc.WithTransportCredentials(creds))
-	if err != nil {
-		t.Fatalf("grpc.NewClient(%q) = %v", ss.Address, err)
-	}
-	defer cc.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			serverCalled := make(chan struct{})
+			ss := &stubserver.StubServer{
+				EmptyCallF: func(context.Context, *testpb.Empty) (*testpb.Empty, error) {
+					close(serverCalled)
+					return nil, nil
+				},
+			}
+			if err := ss.StartServer(grpc.Creds(credentials.NewServerTLSFromCert(&cert))); err != nil {
+				t.Fatalf("Error starting endpoint server: %v", err)
+			}
+			defer ss.Stop()
 
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
-	defer cancel()
+			cc, err := grpc.NewClient(ss.Address, grpc.WithTransportCredentials(creds))
+			if err != nil {
+				t.Fatalf("grpc.NewClient(%q) = %v", ss.Address, err)
+			}
+			defer cc.Close()
 
-	const authority = "auth.example.com"
-	if _, err = testgrpc.NewTestServiceClient(cc).EmptyCall(ctx, &testpb.Empty{}, grpc.CallAuthority(authority)); status.Code(err) != codes.Unavailable {
-		t.Fatalf("EmptyCall() returned status %v, want %v", status.Code(err), codes.Unavailable)
-	}
-	select {
-	case <-serverCalled:
-		t.Fatalf("Server handler should not have been called")
-	case <-time.After(defaultTestShortTimeout):
+			ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
+			defer cancel()
+
+			if _, err = testgrpc.NewTestServiceClient(cc).EmptyCall(ctx, &testpb.Empty{}, grpc.CallAuthority(tt.authority)); status.Code(err) != codes.Unavailable {
+				t.Fatalf("EmptyCall() returned status %v, want %v", status.Code(err), codes.Unavailable)
+			}
+			select {
+			case <-serverCalled:
+				t.Fatalf("Server handler should not have been called")
+			case <-time.After(defaultTestShortTimeout):
+			}
+		})
 	}
 }
 

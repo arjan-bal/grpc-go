@@ -55,10 +55,14 @@ func (t TLSInfo) AuthType() string {
 // :authority header by verifying it against the peer certificates. It returns a
 // non-nil error if the validation fails.
 func (t TLSInfo) ValidateAuthority(authority string) error {
+	host, _, err := net.SplitHostPort(authority)
+	if err != nil {
+		// If the authority had no host port or if the authority cannot be parsed, use it as-is.
+		host = authority
+	}
 	var errs []error
 	for _, cert := range t.State.PeerCertificates {
-		var err error
-		if err = cert.VerifyHostname(authority); err == nil {
+		if err = cert.VerifyHostname(host); err == nil {
 			return nil
 		}
 		errs = append(errs, err)
