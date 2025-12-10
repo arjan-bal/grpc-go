@@ -149,9 +149,12 @@ type http2Server struct {
 func NewServerTransport(conn net.Conn, config *ServerConfig) (_ ServerTransport, err error) {
 	var authInfo credentials.AuthInfo
 	rawConn := conn
+	if config.ReadBufferSize > 0 {
+		conn = NewBufferedReadConn(conn, config.ReadBufferSize)
+	}
 	if config.Credentials != nil {
 		var err error
-		conn, authInfo, err = config.Credentials.ServerHandshake(rawConn)
+		conn, authInfo, err = config.Credentials.ServerHandshake(conn)
 		if err != nil {
 			// ErrConnDispatched means that the connection was dispatched away
 			// from gRPC; those connections should be left open. io.EOF means
@@ -164,12 +167,11 @@ func NewServerTransport(conn net.Conn, config *ServerConfig) (_ ServerTransport,
 		}
 	}
 	writeBufSize := config.WriteBufferSize
-	readBufSize := config.ReadBufferSize
 	maxHeaderListSize := defaultServerMaxHeaderListSize
 	if config.MaxHeaderListSize != nil {
 		maxHeaderListSize = *config.MaxHeaderListSize
 	}
-	framer := newFramer(conn, writeBufSize, readBufSize, config.SharedWriteBuffer, maxHeaderListSize, config.BufferPool)
+	framer := newFramer(conn, writeBufSize, config.SharedWriteBuffer, maxHeaderListSize, config.BufferPool)
 	// Send initial settings as connection preface to client.
 	isettings := []http2.Setting{{
 		ID:  http2.SettingMaxFrameSize,

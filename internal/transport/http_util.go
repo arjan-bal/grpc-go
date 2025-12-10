@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -410,14 +411,11 @@ type framer struct {
 var writeBufferPoolMap = make(map[int]*sync.Pool)
 var writeBufferMutex sync.Mutex
 
-func newFramer(conn io.ReadWriter, writeBufferSize, readBufferSize int, sharedWriteBuffer bool, maxHeaderListSize uint32, memPool mem.BufferPool) *framer {
+func newFramer(conn io.ReadWriter, writeBufferSize int, sharedWriteBuffer bool, maxHeaderListSize uint32, memPool mem.BufferPool) *framer {
 	if writeBufferSize < 0 {
 		writeBufferSize = 0
 	}
 	var r io.Reader = conn
-	if readBufferSize > 0 {
-		r = bufio.NewReaderSize(r, readBufferSize)
-	}
 	var pool *sync.Pool
 	if sharedWriteBuffer {
 		pool = getWriteBufferPool(writeBufferSize)
@@ -621,4 +619,28 @@ func ParseDialTarget(target string) (string, string) {
 		}
 	}
 	return net, target
+}
+
+// BufferedReadConn wraps a net.Conn to buffer reads, reducing syscalls
+// for protocols like TLS that suffer from frequent small reads (header/body).
+type BufferedReadConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+// NewBufferedReadConn wraps the connection.
+// A buffer size of 32KB (32 * 1024) is recommended for TLS, as it covers
+// roughly two max-sized TLS records, ensuring syscall coalescence.
+func NewBufferedReadConn(c net.Conn, size int) *BufferedReadConn {
+	return &BufferedReadConn{
+		Conn: c,
+		r:    bufio.NewReaderSize(c, size),
+	}
+}
+
+// Read delegates to the bufio.Reader.
+// This triggers the "syscall coalescing" logic: if the buffer is empty,
+// bufio will issue a large read to the underlying net.Conn.
+func (b *BufferedReadConn) Read(p []byte) (int, error) {
+	return b.r.Read(p)
 }

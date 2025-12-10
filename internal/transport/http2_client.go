@@ -288,6 +288,11 @@ func NewHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 			perRPCCreds = append(perRPCCreds, t)
 		}
 	}
+
+	if opts.ReadBufferSize > 0 {
+		conn = NewBufferedReadConn(conn, opts.ReadBufferSize)
+	}
+
 	if transportCreds != nil {
 		conn, authInfo, err = transportCreds.ClientHandshake(connectCtx, addr.ServerName, conn)
 		if err != nil {
@@ -315,7 +320,6 @@ func NewHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 		icwz = opts.InitialConnWindowSize
 	}
 	writeBufSize := opts.WriteBufferSize
-	readBufSize := opts.ReadBufferSize
 	maxHeaderListSize := defaultClientMaxHeaderListSize
 	if opts.MaxHeaderListSize != nil {
 		maxHeaderListSize = *opts.MaxHeaderListSize
@@ -336,7 +340,7 @@ func NewHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 		writerDone:            make(chan struct{}),
 		goAway:                make(chan struct{}),
 		keepaliveDone:         make(chan struct{}),
-		framer:                newFramer(conn, writeBufSize, readBufSize, opts.SharedWriteBuffer, maxHeaderListSize, opts.BufferPool),
+		framer:                newFramer(conn, writeBufSize, opts.SharedWriteBuffer, maxHeaderListSize, opts.BufferPool),
 		fc:                    &trInFlow{limit: uint32(icwz)},
 		scheme:                scheme,
 		activeStreams:         make(map[uint32]*ClientStream),
