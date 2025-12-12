@@ -42,6 +42,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/gob"
 	"flag"
 	"fmt"
@@ -64,7 +66,7 @@ import (
 	"google.golang.org/grpc/benchmark/flags"
 	"google.golang.org/grpc/benchmark/latency"
 	"google.golang.org/grpc/benchmark/stats"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/internal"
@@ -73,6 +75,7 @@ import (
 	"google.golang.org/grpc/mem"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/grpc/testdata"
 
 	testgrpc "google.golang.org/grpc/interop/grpc_testing"
 	testpb "google.golang.org/grpc/interop/grpc_testing"
@@ -176,8 +179,26 @@ func (p swappableBufferPool) Put(i *[]byte) {
 	p.BufferPool.Put(i)
 }
 
+var serverCert tls.Certificate
+var certPool *x509.CertPool
+var serverName = "x.test.example.com"
+
 func init() {
 	internal.SetDefaultBufferPoolForTesting.(func(mem.BufferPool))(swappableBufferPool{mem.DefaultBufferPool()})
+	var err error
+	serverCert, err = tls.LoadX509KeyPair(testdata.Path("x509/server1_cert.pem"), testdata.Path("x509/server1_key.pem"))
+	if err != nil {
+		panic(fmt.Sprintf("tls.LoadX509KeyPair(server1.pem, server1.key) failed: %v", err))
+	}
+
+	b, err := os.ReadFile(testdata.Path("x509/server_ca_cert.pem"))
+	if err != nil {
+		panic(fmt.Sprintf("Error reading CA cert file: %v", err))
+	}
+	certPool = x509.NewCertPool()
+	if !certPool.AppendCertsFromPEM(b) {
+		panic("Error appending cert from PEM")
+	}
 }
 
 var (
@@ -377,8 +398,15 @@ func makeClients(bf stats.Features) ([]testgrpc.BenchmarkServiceClient, func()) 
 		logger.Fatalf("Unknown shared recv buffer pool type: %v", bf.RecvBufferPool)
 	}
 
+	clientCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		NextProtos:   []string{}, // Empty list indicates ALPN is disabled.
+		RootCAs:      certPool,
+		ServerName:   serverName,
+	}
+
 	sopts = append(sopts, grpc.MaxConcurrentStreams(uint32(bf.MaxConcurrentCalls+1)))
-	opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(clientCfg)))
 
 	var lis net.Listener
 	if bf.UseBufConn {
@@ -400,6 +428,12 @@ func makeClients(bf stats.Features) ([]testgrpc.BenchmarkServiceClient, func()) 
 		}))
 	}
 	lis = nw.Listener(lis)
+	serverCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		NextProtos:   []string{"h2"},
+	}
+
+	sopts = append(sopts, grpc.Creds(credentials.NewTLS(serverCfg)))
 	stopper := benchmark.StartServer(benchmark.ServerInfo{Type: "protobuf", Listener: lis}, sopts...)
 	conns := make([]*grpc.ClientConn, bf.Connections)
 	clients := make([]testgrpc.BenchmarkServiceClient, bf.Connections)
