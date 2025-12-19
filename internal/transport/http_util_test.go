@@ -19,6 +19,7 @@
 package transport
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -406,10 +407,72 @@ func (s) TestFramer_ParseDataFrame(t *testing.T) {
 			if !ok {
 				t.Fatalf("readFrame() returned %T, want *parsedDataFrame", f)
 			}
-			if gotData := df.data.ReadOnlyData(); !bytes.Equal(gotData, tc.wantData) {
+			if gotData := df.data.Materialize(); !bytes.Equal(gotData, tc.wantData) {
 				t.Fatalf("parsedDataFrame.Data() = %q, want %q", gotData, tc.wantData)
 			}
 			df.data.Free()
 		})
 	}
+}
+
+func BenchmarkReadLarge(b *testing.B) {
+	const readSize = 16 * 1024
+	const dataSize = 1024 * 1024
+	data := bytes.Repeat([]byte{'a'}, dataSize)
+	b.SetBytes(int64(dataSize))
+	b.ReportAllocs()
+
+	b.Run("reader=bufio", func(b *testing.B) {
+		p := make([]byte, readSize)
+		rd := bytes.NewReader(data)
+		r := bufio.NewReaderSize(rd, 32*1024)
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			rd.Seek(0, 0)
+			r.Reset(rd)
+			for {
+				_, err := io.ReadFull(r, p)
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+	b.Run("reader=bufReader", func(b *testing.B) {
+		pool := mem.DefaultBufferPool()
+		rd := bytes.NewReader(data)
+		br := &bufReader{
+			rd:        rd,
+			batchSize: 32 * 1024,
+			pool:      pool,
+		}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			rd.Seek(0, 0)
+			br.r = 0
+			br.w = 0
+			br.err = nil
+			if br.buf != nil {
+				br.bufObj.Free()
+				br.buf = nil
+			}
+			br.pendingReset = false
+			var bufs mem.BufferSlice
+
+			for {
+				var err error
+				bufs, err = br.readLarge(readSize, bufs[:0])
+				bufs.Free()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
 }

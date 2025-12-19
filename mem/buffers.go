@@ -55,6 +55,7 @@ type Buffer interface {
 	Len() int
 
 	split(n int) (left, right Buffer)
+	getView(start, end int) Buffer
 	read(buf []byte) (int, Buffer)
 }
 
@@ -186,6 +187,19 @@ func (b *buffer) split(n int) (Buffer, Buffer) {
 	return b, split
 }
 
+func (b *buffer) getView(start, end int) Buffer {
+	if b.refs == nil {
+		panic("Cannot get view from freed buffer")
+	}
+	b.refs.Add(1)
+	view := newBuffer()
+	view.origData = b.origData
+	view.data = b.data[start:end]
+	view.refs = b.refs
+	view.pool = b.pool
+	return view
+}
+
 func (b *buffer) read(buf []byte) (int, Buffer) {
 	if b.refs == nil {
 		panic("Cannot read freed buffer")
@@ -218,6 +232,13 @@ func SplitUnsafe(buf Buffer, n int) (left, right Buffer) {
 	return buf.split(n)
 }
 
+// GetViewUnsafe returns a new reference to the specified range of bytes in the
+// given Buffer. The returned Buffer functions just like a normal reference
+// acquired using Ref().
+func GetViewUnsafe(buf Buffer, start, end int) Buffer {
+	return buf.getView(start, end)
+}
+
 type emptyBuffer struct{}
 
 func (e emptyBuffer) ReadOnlyData() []byte {
@@ -233,6 +254,10 @@ func (e emptyBuffer) Len() int {
 
 func (e emptyBuffer) split(int) (left, right Buffer) {
 	return e, e
+}
+
+func (e emptyBuffer) getView(start, end int) Buffer {
+	return e
 }
 
 func (e emptyBuffer) read([]byte) (int, Buffer) {
@@ -257,6 +282,10 @@ func (s SliceBuffer) Len() int { return len(s) }
 
 func (s SliceBuffer) split(n int) (left, right Buffer) {
 	return s[:n], s[n:]
+}
+
+func (s SliceBuffer) getView(start, end int) Buffer {
+	return s[start:end]
 }
 
 func (s SliceBuffer) read(buf []byte) (int, Buffer) {

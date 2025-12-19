@@ -841,8 +841,10 @@ func (t *http2Server) handleData(f *parsedDataFrame) {
 			}
 		}
 		if dataLen > 0 {
-			f.data.Ref()
-			s.write(recvMsg{buffer: f.data})
+			for _, data := range f.data {
+				data.Ref()
+				s.write(recvMsg{buffer: data})
+			}
 		}
 	}
 	if f.StreamEnded() {

@@ -1221,8 +1221,10 @@ func (t *http2Client) handleData(f *parsedDataFrame) {
 			}
 		}
 		if dataLen > 0 {
-			f.data.Ref()
-			s.write(recvMsg{buffer: f.data})
+			for _, data := range f.data {
+				data.Ref()
+				s.write(recvMsg{buffer: data})
+			}
 		}
 	}
 	// The server has closed the stream without sending trailers.  Record that

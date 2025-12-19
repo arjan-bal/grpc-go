@@ -19,7 +19,6 @@
 package transport
 
 import (
-	"bufio"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -27,6 +26,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -369,6 +369,149 @@ func (w *bufWriter) flushKeepBuffer() error {
 	return w.err
 }
 
+type bufReader struct {
+	r            int
+	w            int
+	batchSize    int
+	pool         mem.BufferPool
+	buf          *[]byte
+	bufObj       mem.Buffer
+	pendingReset bool
+	rd           io.Reader
+	err          error
+}
+
+func newBufReader(batchSize int, pool mem.BufferPool, reader io.Reader) *bufReader {
+	return &bufReader{
+		batchSize: batchSize,
+		pool:      pool,
+		rd:        reader,
+	}
+}
+
+func (b *bufReader) readErr() error {
+	err := b.err
+	b.err = nil
+	return err
+}
+
+// Buffered returns the number of bytes that can be read from the current buffer.
+func (b *bufReader) Buffered() int { return b.w - b.r }
+
+// Read reads data into p.
+// It returns the number of bytes read into p.
+// The bytes are taken from at most one Read on the underlying [Reader],
+// hence n may be less than len(p).
+// To read exactly len(p) bytes, use io.ReadFull(b, p).
+// If the underlying [Reader] can return a non-zero count with io.EOF,
+// then this Read method can do so as well; see the [io.Reader] docs.
+func (b *bufReader) Read(p []byte) (n int, err error) {
+	// Buffering disabled.
+	if b.batchSize == 0 {
+		return b.rd.Read(p)
+	}
+	n = len(p)
+	if n == 0 {
+		if b.Buffered() > 0 {
+			return 0, nil
+		}
+		return 0, b.readErr()
+	}
+	if b.r == b.w {
+		if b.err != nil {
+			return 0, b.readErr()
+		}
+		if len(p) >= b.batchSize {
+			// Large read, empty buffer.
+			// Read directly into p to avoid copy.
+			n, b.err = b.rd.Read(p)
+			return n, b.readErr()
+		}
+		// One read.
+		b.r = 0
+		b.w = 0
+		if b.buf == nil {
+			b.buf = b.pool.Get(b.batchSize)
+			b.bufObj = mem.NewBuffer(b.buf, b.pool)
+		}
+		n, b.err = b.rd.Read(*b.buf)
+		if n == 0 {
+			return 0, b.readErr()
+		}
+		b.w += n
+	}
+
+	// copy as much as we can
+	// Note: if the slice panics here, it is probably because
+	// the underlying reader returned a bad count. See issue 49795.
+	n = copy(p, (*b.buf)[b.r:b.w])
+	b.r += n
+	if b.r == b.w && b.pendingReset {
+		b.pendingReset = false
+		b.bufObj.Free()
+		b.buf = nil
+	}
+	return n, nil
+}
+
+// readLarge reads exactly n bytes from the underlying reader and appends them to buf.
+// This function allocates buffers from the pool as needed and passed ownership of the buffer to the
+// caller, avoiding copies.
+//
+// This function appends at most two slices to buf.
+func (b *bufReader) readLarge(requestedBytes int, res mem.BufferSlice) (mem.BufferSlice, error) {
+	if requestedBytes == 0 {
+		if b.Buffered() > 0 {
+			return res, nil
+		}
+		return res, b.readErr()
+	}
+	// Read repeatedly until either:
+	// * We have >= n bytes, or
+	// * Buf if full.
+	// This tries to maximize buffer utilization of buf.
+
+	if b.buf != nil {
+		buf := *b.buf
+		for b.Buffered() < requestedBytes && b.w < len(buf) {
+			var n int
+			n, b.err = b.rd.Read(buf[b.w:])
+			if n == 0 {
+				if b.err == nil || b.err == io.EOF {
+					b.err = io.ErrUnexpectedEOF
+				}
+				return res, b.readErr()
+			}
+			b.w += n
+		}
+	}
+
+	// Consume from the existing buffer if there are bytes available.
+	// Mark it for reset, since the subslice returned by GetViewFromBuf can't be reused.
+	if b.Buffered() > 0 {
+		consumed := min(requestedBytes, b.Buffered())
+		memBuf := mem.GetViewUnsafe(b.bufObj, b.r, b.r+consumed)
+		b.r += consumed
+		requestedBytes -= consumed
+		b.pendingReset = true
+		res = append(res, memBuf)
+	}
+	// Do we need more bytes?
+	// Yes: Allocate a new buffer of the exact size, call io.ReadFull, and append.
+	// No: Return the current buffer.
+
+	if requestedBytes <= 0 {
+		return res, nil
+	}
+
+	// Append existing buffer to res.
+	secondBuf := b.pool.Get(requestedBytes)
+	_, b.err = io.ReadFull(b.rd, *secondBuf)
+	res = append(res, mem.NewBuffer(secondBuf, b.pool))
+
+	return res, b.readErr()
+}
+
 type ioError struct {
 	error
 }
@@ -390,7 +533,7 @@ func toIOError(err error) error {
 
 type parsedDataFrame struct {
 	http2.FrameHeader
-	data mem.Buffer
+	data mem.BufferSlice
 }
 
 func (df *parsedDataFrame) StreamEnded() bool {
@@ -398,13 +541,14 @@ func (df *parsedDataFrame) StreamEnded() bool {
 }
 
 type framer struct {
-	writer    *bufWriter
-	fr        *http2.Framer
-	headerBuf []byte // cached slice for framer headers to reduce heap allocs.
-	reader    io.Reader
-	dataFrame parsedDataFrame // Cached data frame to avoid heap allocations.
-	pool      mem.BufferPool
-	errDetail error
+	writer      *bufWriter
+	fr          *http2.Framer
+	headerBuf   []byte // cached slice for framer headers to reduce heap allocs.
+	reader      *bufReader
+	dataFrame   parsedDataFrame // Cached data frame to avoid heap allocations.
+	pool        mem.BufferPool
+	readTempBuf []byte
+	errDetail   error
 }
 
 var writeBufferPoolMap = make(map[int]*sync.Pool)
@@ -414,10 +558,7 @@ func newFramer(conn io.ReadWriter, writeBufferSize, readBufferSize int, sharedWr
 	if writeBufferSize < 0 {
 		writeBufferSize = 0
 	}
-	var r io.Reader = conn
-	if readBufferSize > 0 {
-		r = bufio.NewReaderSize(r, readBufferSize)
-	}
+	r := newBufReader(readBufferSize, memPool, conn)
 	var pool *sync.Pool
 	if sharedWriteBuffer {
 		pool = getWriteBufferPool(writeBufferSize)
@@ -516,38 +657,24 @@ func (f *framer) readDataFrame(fh http2.FrameHeader) (err error) {
 		f.errDetail = errors.New("DATA frame with stream ID 0")
 		return http2.ConnectionError(http2.ErrCodeProtocol)
 	}
-	// Converting a *[]byte to a mem.SliceBuffer incurs a heap allocation. This
-	// conversion is performed by mem.NewBuffer. To avoid the extra allocation
-	// a []byte is allocated directly if required and cast to a mem.SliceBuffer.
-	var buf []byte
-	// poolHandle is the pointer returned by the buffer pool (if it's used.).
-	var poolHandle *[]byte
-	useBufferPool := !mem.IsBelowBufferPoolingThreshold(int(fh.Length))
-	if useBufferPool {
-		poolHandle = f.pool.Get(int(fh.Length))
-		buf = *poolHandle
-		defer func() {
-			if err != nil {
-				f.pool.Put(poolHandle)
-			}
-		}()
-	} else {
-		buf = make([]byte, int(fh.Length))
-	}
+	var padSize int
+	payloadLen := int(fh.Length)
 	if fh.Flags.Has(http2.FlagDataPadded) {
 		if fh.Length == 0 {
 			return io.ErrUnexpectedEOF
 		}
+		f.readTempBuf = slices.Grow(f.readTempBuf, 1)
+		f.readTempBuf = f.readTempBuf[:1]
 		// This initial 1-byte read can be inefficient for unbuffered readers,
 		// but it allows the rest of the payload to be read directly to the
 		// start of the destination slice. This makes it easy to return the
 		// original slice back to the buffer pool.
-		if _, err := io.ReadFull(f.reader, buf[:1]); err != nil {
+		if _, err := io.ReadFull(f.reader, f.readTempBuf); err != nil {
 			return err
 		}
-		padSize := buf[0]
-		buf = buf[:len(buf)-1]
-		if int(padSize) > len(buf) {
+		payloadLen--
+		padSize = int(f.readTempBuf[0])
+		if int(padSize) > payloadLen {
 			// If the length of the padding is greater than the
 			// length of the frame payload, the recipient MUST
 			// treat this as a connection error.
@@ -555,22 +682,37 @@ func (f *framer) readDataFrame(fh http2.FrameHeader) (err error) {
 			f.errDetail = errors.New("pad size larger than data payload")
 			return http2.ConnectionError(http2.ErrCodeProtocol)
 		}
-		if _, err := io.ReadFull(f.reader, buf); err != nil {
-			return err
-		}
-		buf = buf[:len(buf)-int(padSize)]
-	} else if _, err := io.ReadFull(f.reader, buf); err != nil {
+		payloadLen -= padSize
+	}
+
+	useBufferPool := !mem.IsBelowBufferPoolingThreshold(int(fh.Length))
+	payload := make(mem.BufferSlice, 0, 2)
+	if useBufferPool {
+		payload, err = f.reader.readLarge(payloadLen, payload)
+		defer func() {
+			if err != nil {
+				payload.Free()
+			}
+		}()
+	} else {
+		buf := make([]byte, payloadLen)
+		_, err = io.ReadFull(f.reader, buf)
+		payload = append(payload, mem.SliceBuffer(buf))
+	}
+	if err != nil {
 		return err
 	}
 
-	f.dataFrame.FrameHeader = fh
-	if useBufferPool {
-		// Update the handle to point to the (potentially re-sliced) buf.
-		*poolHandle = buf
-		f.dataFrame.data = mem.NewBuffer(poolHandle, f.pool)
-	} else {
-		f.dataFrame.data = mem.SliceBuffer(buf)
+	if padSize > 0 {
+		// Max pad size is 255 bytes.
+		f.readTempBuf = slices.Grow(f.readTempBuf, padSize)
+		if _, err := io.ReadFull(f.reader, f.readTempBuf[:padSize]); err != nil {
+			return err
+		}
 	}
+
+	f.dataFrame.FrameHeader = fh
+	f.dataFrame.data = payload
 	return nil
 }
 
