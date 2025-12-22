@@ -449,14 +449,15 @@ func (b *bufReader) Read(p []byte) (n int, err error) {
 	if b.r == b.w && b.pendingReset {
 		b.pendingReset = false
 		b.bufObj.Free()
+		b.bufObj = nil
 		b.buf = nil
 	}
 	return n, nil
 }
 
-// readLarge reads exactly n bytes from the underlying reader and appends them to buf.
-// This function allocates buffers from the pool as needed and passed ownership of the buffer to the
-// caller, avoiding copies.
+// readLarge reads exactly n bytes from the underlying reader and appends them
+// to buf. This function allocates buffers from the pool as needed and passes
+// ownership of the buffer to the caller, avoiding copies.
 //
 // This function appends at most two slices to buf.
 func (b *bufReader) readLarge(requestedBytes int, res mem.BufferSlice) (mem.BufferSlice, error) {
@@ -495,6 +496,12 @@ func (b *bufReader) readLarge(requestedBytes int, res mem.BufferSlice) (mem.Buff
 		requestedBytes -= consumed
 		b.pendingReset = true
 		res = append(res, memBuf)
+	}
+	if b.r == b.w && b.pendingReset {
+		b.pendingReset = false
+		b.bufObj.Free()
+		b.bufObj = nil
+		b.buf = nil
 	}
 	// Do we need more bytes?
 	// Yes: Allocate a new buffer of the exact size, call io.ReadFull, and append.
@@ -685,8 +692,8 @@ func (f *framer) readDataFrame(fh http2.FrameHeader) (err error) {
 		payloadLen -= padSize
 	}
 
-	useBufferPool := !mem.IsBelowBufferPoolingThreshold(int(fh.Length))
-	payload := make(mem.BufferSlice, 0, 2)
+	useBufferPool := !mem.IsBelowBufferPoolingThreshold(payloadLen)
+	payload := f.dataFrame.data[:0]
 	if useBufferPool {
 		payload, err = f.reader.readLarge(payloadLen, payload)
 		defer func() {
