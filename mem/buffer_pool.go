@@ -129,7 +129,7 @@ func (p *sizedBufferPool) Get(size int) *[]byte {
 		return &buf
 	}
 	b := *buf
-	clear(b[:cap(b)])
+	// clear(b[:cap(b)])
 	*buf = b[:size]
 	return buf
 }
@@ -163,7 +163,7 @@ type simpleBufferPool struct {
 func (p *simpleBufferPool) Get(size int) *[]byte {
 	bs, ok := p.pool.Get().(*[]byte)
 	if ok && cap(*bs) >= size {
-		clear((*bs)[:cap(*bs)])
+		// clear((*bs)[:cap(*bs)])
 		*bs = (*bs)[:size]
 		return bs
 	}
