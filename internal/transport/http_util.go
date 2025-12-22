@@ -474,7 +474,7 @@ func (b *bufReader) readLarge(requestedBytes int, res mem.BufferSlice) (mem.Buff
 
 	if b.buf != nil {
 		buf := *b.buf
-		for b.Buffered() < requestedBytes && b.w < len(buf) {
+		for b.Buffered() < requestedBytes && 2*b.w < len(buf) {
 			var n int
 			n, b.err = b.rd.Read(buf[b.w:])
 			if n == 0 {
@@ -491,11 +491,10 @@ func (b *bufReader) readLarge(requestedBytes int, res mem.BufferSlice) (mem.Buff
 	// Mark it for reset, since the subslice returned by GetViewFromBuf can't be reused.
 	if b.Buffered() > 0 {
 		consumed := min(requestedBytes, b.Buffered())
-		memBuf := mem.GetViewUnsafe(b.bufObj, b.r, b.r+consumed)
+		res = append(res, mem.GetViewUnsafe(b.bufObj, b.r, b.r+consumed))
 		b.r += consumed
 		requestedBytes -= consumed
 		b.pendingReset = true
-		res = append(res, memBuf)
 	}
 	if b.r == b.w && b.pendingReset {
 		b.pendingReset = false
@@ -512,9 +511,36 @@ func (b *bufReader) readLarge(requestedBytes int, res mem.BufferSlice) (mem.Buff
 	}
 
 	// Append existing buffer to res.
-	secondBuf := b.pool.Get(requestedBytes)
-	_, b.err = io.ReadFull(b.rd, *secondBuf)
-	res = append(res, mem.NewBuffer(secondBuf, b.pool))
+	newBufSize := max(requestedBytes, b.batchSize)
+	b.buf = b.pool.Get(newBufSize)
+	b.r = 0
+	b.w = 0
+	b.bufObj = mem.NewBuffer(b.buf, b.pool)
+	buf := *b.buf
+
+	for b.Buffered() < requestedBytes && b.w < len(buf) {
+		var n int
+		n, b.err = b.rd.Read(buf[b.w:])
+		if n == 0 {
+			if b.err == nil || b.err == io.EOF {
+				b.err = io.ErrUnexpectedEOF
+			}
+			return res, b.readErr()
+		}
+		b.w += n
+	}
+
+	consumed := min(requestedBytes, b.Buffered())
+	res = append(res, mem.GetViewUnsafe(b.bufObj, b.r, b.r+consumed))
+	b.r += consumed
+	requestedBytes -= consumed
+	b.pendingReset = true
+	if b.r == b.w && b.pendingReset {
+		b.pendingReset = false
+		b.bufObj.Free()
+		b.bufObj = nil
+		b.buf = nil
+	}
 
 	return res, b.readErr()
 }
