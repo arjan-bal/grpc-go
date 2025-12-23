@@ -55,7 +55,7 @@ type Buffer interface {
 	Len() int
 
 	split(n int) (left, right Buffer)
-	getView(start, end int) Buffer
+	view(start, end int) Buffer
 	read(buf []byte) (int, Buffer)
 }
 
@@ -208,9 +208,14 @@ func (b *buffer) split(n int) (Buffer, Buffer) {
 	return b, split
 }
 
-func (b *buffer) getView(start, end int) Buffer {
+func (b *buffer) view(start, end int) Buffer {
 	if b.refs == nil {
 		panic("Cannot get view from freed buffer")
+	}
+	if size := end - start; IsBelowBufferPoolingThreshold(size) {
+		buf := make(SliceBuffer, size)
+		copy(buf, b.data[start:end])
+		return buf
 	}
 	b.rootBuf.Ref()
 	view := newBuffer()
@@ -254,11 +259,11 @@ func SplitUnsafe(buf Buffer, n int) (left, right Buffer) {
 	return buf.split(n)
 }
 
-// GetViewUnsafe returns a new reference to the specified range of bytes in the
+// View returns a new reference to the specified range of bytes in the
 // given Buffer. The returned Buffer functions just like a normal reference
 // acquired using Ref().
-func GetViewUnsafe(buf Buffer, start, end int) Buffer {
-	return buf.getView(start, end)
+func View(buf Buffer, start, end int) Buffer {
+	return buf.view(start, end)
 }
 
 type emptyBuffer struct{}
@@ -278,7 +283,7 @@ func (e emptyBuffer) split(int) (left, right Buffer) {
 	return e, e
 }
 
-func (e emptyBuffer) getView(int, int) Buffer {
+func (e emptyBuffer) view(int, int) Buffer {
 	return e
 }
 
@@ -306,7 +311,7 @@ func (s SliceBuffer) split(n int) (left, right Buffer) {
 	return s[:n], s[n:]
 }
 
-func (s SliceBuffer) getView(start, end int) Buffer {
+func (s SliceBuffer) view(start, end int) Buffer {
 	return s[start:end]
 }
 

@@ -491,7 +491,7 @@ func (b *bufReader) readLarge(requestedBytes int, res mem.BufferSlice) (mem.Buff
 	// Mark it for reset, since the subslice returned by GetViewFromBuf can't be reused.
 	if b.Buffered() > 0 {
 		consumed := min(requestedBytes, b.Buffered())
-		res = append(res, mem.GetViewUnsafe(b.bufObj, b.r, b.r+consumed))
+		res = append(res, mem.View(b.bufObj, b.r, b.r+consumed))
 		b.r += consumed
 		requestedBytes -= consumed
 		b.pendingReset = true
@@ -531,7 +531,7 @@ func (b *bufReader) readLarge(requestedBytes int, res mem.BufferSlice) (mem.Buff
 	}
 
 	consumed := min(requestedBytes, b.Buffered())
-	res = append(res, mem.GetViewUnsafe(b.bufObj, b.r, b.r+consumed))
+	res = append(res, mem.View(b.bufObj, b.r, b.r+consumed))
 	b.r += consumed
 	requestedBytes -= consumed
 	b.pendingReset = true
