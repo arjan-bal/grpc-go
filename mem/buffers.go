@@ -183,6 +183,7 @@ func (b *buffer) Free() {
 		b.rootBuf.Free()
 	}
 
+	b.rootBuf = nil
 	bufferObjectPool.Put(b)
 }
 
@@ -211,12 +212,13 @@ func (b *buffer) getView(start, end int) Buffer {
 	if b.refs == nil {
 		panic("Cannot get view from freed buffer")
 	}
-	b.refs.Add(1)
+	b.rootBuf.Ref()
 	view := newBuffer()
-	view.origData = b.origData
 	view.data = b.data[start:end]
-	view.refs = b.refs
-	view.pool = b.pool
+	view.rootBuf = b.rootBuf
+	view.refs = refObjectPool.Get().(*atomic.Int32)
+	view.refs.Add(1)
+
 	return view
 }
 
@@ -276,7 +278,7 @@ func (e emptyBuffer) split(int) (left, right Buffer) {
 	return e, e
 }
 
-func (e emptyBuffer) getView(start, end int) Buffer {
+func (e emptyBuffer) getView(int, int) Buffer {
 	return e
 }
 
