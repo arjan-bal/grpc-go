@@ -68,7 +68,7 @@ const (
 	// altsRecordDefaultLength.
 	altsWriteBufferMaxSize = 512 * 1024 // 512KiB
 	// The initial buffer used to read from the network.
-	altsReadBufferInitialSize = 32 * 1024 // 32KiB
+	altsReadBufferInitialSize = 33 * 1024 // 33KiB
 )
 
 var (
