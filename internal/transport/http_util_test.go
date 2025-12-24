@@ -459,7 +459,7 @@ func BenchmarkReadLarge(b *testing.B) {
 				br.bufObj.Free()
 				br.buf = nil
 			}
-			br.pendingReset = false
+			br.utilizationTargetMet = false
 			var bufs mem.BufferSlice
 
 			for {

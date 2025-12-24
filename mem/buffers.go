@@ -215,6 +215,10 @@ func (b *buffer) view(start, end int) Buffer {
 	if !b.refs.initialized {
 		panic("Cannot get view from freed buffer")
 	}
+	if end-start == len(b.data) {
+		b.refs.Add(1)
+		return b
+	}
 	if size := end - start; IsBelowBufferPoolingThreshold(size) {
 		buf := make(SliceBuffer, size)
 		copy(buf, b.data[start:end])

@@ -369,16 +369,21 @@ func (w *bufWriter) flushKeepBuffer() error {
 	return w.err
 }
 
+// minUtilizationFactor controls the minimum buffer utilization required to
+// pass ownership of the buffer in readLarge. At least 1/minUtilizationFactor
+// of the buffer length must be used.
+const minUtilizationFactor = 4
+
 type bufReader struct {
-	r            int
-	w            int
-	batchSize    int
-	pool         mem.BufferPool
-	buf          *[]byte
-	bufObj       mem.Buffer
-	pendingReset bool
-	rd           io.Reader
-	err          error
+	r                    int
+	w                    int
+	batchSize            int
+	pool                 mem.BufferPool
+	buf                  *[]byte
+	bufObj               mem.Buffer
+	utilizationTargetMet bool
+	rd                   io.Reader
+	err                  error
 }
 
 func newBufReader(batchSize int, pool mem.BufferPool, reader io.Reader) *bufReader {
@@ -400,10 +405,9 @@ func (b *bufReader) Buffered() int { return b.w - b.r }
 
 // Read reads data into p.
 // It returns the number of bytes read into p.
-// The bytes are taken from at most one Read on the underlying [Reader],
+// The bytes are taken from at most one Read on the underlying [io.Reader],
 // hence n may be less than len(p).
-// To read exactly len(p) bytes, use io.ReadFull(b, p).
-// If the underlying [Reader] can return a non-zero count with io.EOF,
+// If the underlying [io.Reader] can return a non-zero count with io.EOF,
 // then this Read method can do so as well; see the [io.Reader] docs.
 func (b *bufReader) Read(p []byte) (n int, err error) {
 	// Buffering disabled.
@@ -446,13 +450,24 @@ func (b *bufReader) Read(p []byte) (n int, err error) {
 	// the underlying reader returned a bad count. See issue 49795.
 	n = copy(p, (*b.buf)[b.r:b.w])
 	b.r += n
-	if b.r == b.w && b.pendingReset {
-		b.pendingReset = false
+	b.resetBufferIfNeeded()
+	return n, nil
+}
+
+func (b *bufReader) resetBufferIfNeeded() {
+	if b.r != b.w {
+		return
+	}
+
+	if b.utilizationTargetMet {
+		b.utilizationTargetMet = false
 		b.bufObj.Free()
 		b.bufObj = nil
 		b.buf = nil
 	}
-	return n, nil
+
+	b.r = 0
+	b.w = 0
 }
 
 // readLarge reads exactly n bytes from the underlying reader and appends them
@@ -467,15 +482,14 @@ func (b *bufReader) readLarge(requestedBytes int, res mem.BufferSlice) (mem.Buff
 		}
 		return res, b.readErr()
 	}
-	// Read repeatedly until either:
-	// * We have >= n bytes, or
-	// * Buf if full.
-	// This tries to maximize buffer utilization of buf.
-
-	if b.buf != nil {
+	// If the buffer is not completely filled and it has enough capacity to hold
+	// the requestedBytes, read into it. This may lead to small read syscalls,
+	// however if there was pending data, the buffer should have been full
+	// already.
+	if b.buf != nil && len(*b.buf)-b.r >= requestedBytes {
 		buf := *b.buf
-		for b.Buffered() < requestedBytes && 2*b.w < len(buf) {
-			var n int
+		var n int
+		for b.Buffered() < requestedBytes {
 			n, b.err = b.rd.Read(buf[b.w:])
 			if n == 0 {
 				if b.err == nil || b.err == io.EOF {
@@ -487,35 +501,45 @@ func (b *bufReader) readLarge(requestedBytes int, res mem.BufferSlice) (mem.Buff
 		}
 	}
 
-	// Consume from the existing buffer if there are bytes available.
-	// Mark it for reset, since the subslice returned by GetViewFromBuf can't be reused.
-	if b.Buffered() > 0 {
-		consumed := min(requestedBytes, b.Buffered())
-		res = append(res, mem.View(b.bufObj, b.r, b.r+consumed))
-		b.r += consumed
-		requestedBytes -= consumed
-		b.pendingReset = true
+	if consumable := min(b.Buffered(), requestedBytes); consumable > 0 {
+		buf := *b.buf
+		if b.utilizationTargetMet || consumable*minUtilizationFactor >= len(buf) {
+			// Take ownership.
+			res = append(res, mem.View(b.bufObj, b.r, b.r+consumable))
+			b.utilizationTargetMet = true
+		} else {
+			// Copy from the underlying buffer.
+			res = append(res, mem.Copy(buf[b.r:b.r+consumable], b.pool))
+		}
+		b.r += consumable
+		requestedBytes -= consumable
+		b.resetBufferIfNeeded()
 	}
-	if b.r == b.w && b.pendingReset {
-		b.pendingReset = false
-		b.bufObj.Free()
-		b.bufObj = nil
-		b.buf = nil
-	}
-	// Do we need more bytes?
-	// Yes: Allocate a new buffer of the exact size, call io.ReadFull, and append.
-	// No: Return the current buffer.
 
 	if requestedBytes <= 0 {
+		// Got the required number of bytes, return.
 		return res, nil
 	}
 
-	// Append existing buffer to res.
-	newBufSize := max(requestedBytes, b.batchSize)
-	b.buf = b.pool.Get(newBufSize)
-	b.r = 0
-	b.w = 0
-	b.bufObj = mem.NewBuffer(b.buf, b.pool)
+	// Existing b.buf is completely used, possibly nil.
+
+	// We need to give a buffer of size at least batchSize to the underlying
+	// Reader for the first read call to keep kernel context switching overhead
+	// low when there are enough bytes to read.
+	newBufSize := b.batchSize
+	if requestedBytes >= b.batchSize {
+		// Allocate a new buffer and read into it.
+		newBufSize = requestedBytes
+		buf := b.pool.Get(newBufSize)
+		_, b.err = io.ReadFull(b.rd, *buf)
+		res = append(res, mem.NewBuffer(buf, b.pool))
+		return res, b.readErr()
+	}
+	// Read into the b.buf and potentially give a view.
+	if b.buf == nil {
+		b.buf = b.pool.Get(newBufSize)
+		b.bufObj = mem.NewBuffer(b.buf, b.pool)
+	}
 	buf := *b.buf
 
 	for b.Buffered() < requestedBytes && b.w < len(buf) {
@@ -530,18 +554,17 @@ func (b *bufReader) readLarge(requestedBytes int, res mem.BufferSlice) (mem.Buff
 		b.w += n
 	}
 
-	consumed := min(requestedBytes, b.Buffered())
-	res = append(res, mem.View(b.bufObj, b.r, b.r+consumed))
-	b.r += consumed
-	requestedBytes -= consumed
-	b.pendingReset = true
-	if b.r == b.w && b.pendingReset {
-		b.pendingReset = false
-		b.bufObj.Free()
-		b.bufObj = nil
-		b.buf = nil
+	if requestedBytes*minUtilizationFactor >= len(buf) {
+		// Take ownership.
+		res = append(res, mem.View(b.bufObj, b.r, b.r+requestedBytes))
+		b.utilizationTargetMet = true
+	} else {
+		// Copy from the underlying buffer.
+		res = append(res, mem.Copy(buf[b.r:b.r+requestedBytes], b.pool))
 	}
 
+	b.r += requestedBytes
+	b.resetBufferIfNeeded()
 	return res, b.readErr()
 }
 
