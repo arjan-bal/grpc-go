@@ -1286,6 +1286,7 @@ func (t *http2Server) Close(err error) {
 	if err := t.conn.Close(); err != nil && t.logger.V(logLevel) {
 		t.logger.Infof("Error closing underlying net.Conn during Close: %v", err)
 	}
+	t.framer.close()
 	channelz.RemoveEntry(t.channelz.ID)
 	// Cancel all active streams.
 	for _, s := range streams {

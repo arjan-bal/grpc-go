@@ -55,7 +55,7 @@ type Buffer interface {
 	Len() int
 
 	split(n int) (left, right Buffer)
-	view(start, end int) Buffer
+	slice(start, end int) Buffer
 	read(buf []byte) (int, Buffer)
 }
 
@@ -74,7 +74,11 @@ func IsBelowBufferPoolingThreshold(size int) bool {
 
 type atomicInt32 struct {
 	atomic.Int32
-	initialized bool // enables sanity checks without the overhead of atomic operations.
+	// initialized enables sanity checks without the overhead of atomic
+	// operations. This field is not safe for concurrent access and is used
+	// in a best-effort manner for debugging/assertion purposes only. It does
+	// not play a role in the concurrent logic of reference counting.
+	initialized bool
 }
 
 type buffer struct {
@@ -211,9 +215,9 @@ func (b *buffer) split(n int) (Buffer, Buffer) {
 	return b, split
 }
 
-func (b *buffer) view(start, end int) Buffer {
+func (b *buffer) slice(start, end int) Buffer {
 	if !b.refs.initialized {
-		panic("Cannot get view from freed buffer")
+		panic("Cannot get slice of a freed buffer")
 	}
 	if end-start == len(b.data) {
 		b.refs.Add(1)
@@ -224,6 +228,9 @@ func (b *buffer) view(start, end int) Buffer {
 		copy(buf, b.data[start:end])
 		return buf
 	}
+	// We are creating a new reference (view) to a portion of the root buffer's
+	// data. Therefore, we must increment the reference count of the root buffer
+	// to ensure the underlying data is not freed while this view is still in use.
 	b.rootBuf.Ref()
 	view := newBuffer()
 	view.data = b.data[start:end]
@@ -266,11 +273,12 @@ func SplitUnsafe(buf Buffer, n int) (left, right Buffer) {
 	return buf.split(n)
 }
 
-// View returns a new reference to the specified range of bytes in the
+// Slice returns a new reference to the specified range of bytes in the
 // given Buffer. The returned Buffer functions just like a normal reference
-// acquired using Ref().
-func View(buf Buffer, start, end int) Buffer {
-	return buf.view(start, end)
+// acquired using Ref(). The range includes the element at the start index
+// but excludes the element at the end index.
+func Slice(buf Buffer, start, end int) Buffer {
+	return buf.slice(start, end)
 }
 
 type emptyBuffer struct{}
@@ -290,7 +298,7 @@ func (e emptyBuffer) split(int) (left, right Buffer) {
 	return e, e
 }
 
-func (e emptyBuffer) view(int, int) Buffer {
+func (e emptyBuffer) slice(int, int) Buffer {
 	return e
 }
 
@@ -318,7 +326,7 @@ func (s SliceBuffer) split(n int) (left, right Buffer) {
 	return s[:n], s[n:]
 }
 
-func (s SliceBuffer) view(start, end int) Buffer {
+func (s SliceBuffer) slice(start, end int) Buffer {
 	return s[start:end]
 }
 

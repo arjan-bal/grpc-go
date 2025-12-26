@@ -32,6 +32,8 @@ import (
 	"time"
 
 	"golang.org/x/net/http2"
+
+	"google.golang.org/grpc/internal"
 	"google.golang.org/grpc/mem"
 )
 
@@ -415,6 +417,193 @@ func (s) TestFramer_ParseDataFrame(t *testing.T) {
 	}
 }
 
+func (s) TestBufReaderRead(t *testing.T) {
+	br := newBufReader(3, minReadBufferUtilizationFactor, mem.DefaultBufferPool(), strings.NewReader("abcdef"))
+	buf := make([]byte, 2)
+	n, err := br.Read(buf) // buf="ab", br.buf="abc", r=2, w=3
+	if err != nil || n != 2 || string(buf) != "ab" {
+		t.Fatalf(`Read(buf[:2]) = %d, %v, %s; want 2, nil, "ab"`, n, err, string(buf))
+	}
+	n, err = br.Read(buf) // buf="c", br.buf="abc", r=3, w=3 -> reset r=0,w=0. br.buf="def", r=1, w=3
+	if err != nil || n != 1 || string(buf[:n]) != "c" {
+		t.Fatalf(`Read(buf[:2]) = %d, %v, %s; want 1, nil, "c"`, n, err, string(buf[:n]))
+	}
+	// after reading "c", b.r=3, b.w=3, buffer is reset. r=0, w=0.
+	// next read should fill buffer with "def"
+	n, err = br.Read(buf) // br.buf="def", n=3, w=3. copy 2 bytes. buf="de", r=2, w=3
+	if err != nil || n != 2 || string(buf) != "de" {
+		t.Fatalf(`Read(buf[:2]) = %d, %v, %s; want 2, nil, "de"`, n, err, string(buf))
+	}
+	n, err = br.Read(buf) // buf="f", r=3, w=3 -> reset r=0, w=0.
+	if err != nil || n != 1 || string(buf[:n]) != "f" {
+		t.Fatalf(`Read(buf[:2]) = %d, %v, %s; want 1, nil, "f"`, n, err, string(buf[:n]))
+	}
+	n, err = br.Read(buf)
+	if err != io.EOF || n != 0 {
+		t.Fatalf(`Read(buf[:2]) = %d, %v; want 0, EOF`, n, err)
+	}
+}
+
+func (s) TestBufReaderReadLarge(t *testing.T) {
+	br := newBufReader(3, minReadBufferUtilizationFactor, mem.DefaultBufferPool(), strings.NewReader("abcdef"))
+	buf := make([]byte, 4)
+	n, err := br.Read(buf)
+	if err != nil || n != 4 || string(buf) != "abcd" {
+		t.Fatalf(`Read(buf[:4]) = %d, %v, %s; want 4, nil, "abcd"`, n, err, string(buf))
+	}
+}
+
+func setBufferPoolingThreshold(t *testing.T, threshold int) {
+	t.Helper()
+	if setter, ok := internal.SetBufferPoolingThresholdForTesting.(func(int)); ok {
+		setter(threshold)
+		t.Cleanup(func() { setter(1024) })
+	} else {
+		t.Fatal("internal.SetBufferPoolingThresholdForTesting not set up")
+	}
+}
+
+type countingBufferPool struct {
+	mem.BufferPool
+	inUse int
+	t     *testing.T
+}
+
+func newCountingBufferPool(t *testing.T) *countingBufferPool {
+	return &countingBufferPool{
+		BufferPool: mem.DefaultBufferPool(),
+		t:          t,
+	}
+}
+
+func (p *countingBufferPool) Get(size int) *[]byte {
+	p.inUse++
+	return p.BufferPool.Get(size)
+}
+
+func (p *countingBufferPool) Put(b *[]byte) {
+	p.inUse--
+	p.BufferPool.Put(b)
+}
+
+func (p *countingBufferPool) InUse() int {
+	return p.inUse
+}
+
+func (s) TestBufReaderReadExact(t *testing.T) {
+	setBufferPoolingThreshold(t, 0)
+	const batchSize = 4
+	const utilizationFactor = 2 // utilization factor: slice if consumable >= 2.
+
+	tests := []struct {
+		name string
+		// bufReader initial state
+		readerData string // data for io.Reader
+		setupRead  int    // bytes to read in setup with br.Read
+		// readExact params
+		readBytes int
+		// expectations
+		wantBytes             []byte
+		wantFreeBufferOnReset bool
+		wantPoolInUse         int
+		wantErr               error
+	}{
+		{
+			name:          "1_byte_from_empty_buf_copy",
+			readerData:    "a",
+			readBytes:     1,
+			wantBytes:     []byte("a"),
+			wantPoolInUse: 2, // reader buf + copy buf
+		},
+		{
+			name:                  "2_bytes_from_empty_buf_slice",
+			readerData:            "abc",
+			readBytes:             2,
+			wantBytes:             []byte("ab"),
+			wantFreeBufferOnReset: true,
+			wantPoolInUse:         1, // reader buf is sliced
+		},
+		{
+			name:          "1_byte_in_buf_read_1_byte_copy",
+			readerData:    "ab",
+			setupRead:     1, // Read("a"), 'b' is in buf
+			readBytes:     1,
+			wantBytes:     []byte("b"),
+			wantPoolInUse: 2, // reader buf + copy buf
+		},
+		{
+			name:                  "2_bytes_in_buf_read_2_bytes_slice",
+			readerData:            "abcd",
+			setupRead:             1, // Read("a"), "bc" is in buf
+			readBytes:             2,
+			wantBytes:             []byte("bc"),
+			wantFreeBufferOnReset: true,
+			wantPoolInUse:         1, // reader buf is sliced
+		},
+		{
+			name:          "read_gt_batchSize_bytes_large_read_from_pool",
+			readerData:    "abcde",
+			setupRead:     0,
+			readBytes:     batchSize + 1,
+			wantBytes:     []byte("abcde"),
+			wantPoolInUse: 1, // large read buffer
+		},
+		{
+			name:          "1_byte_in_buf_copy_then_gt_batchsize_large_read",
+			readerData:    "abcde123",
+			setupRead:     3, // read "abc", 'd' in buf, 'e123' in reader
+			readBytes:     1 + batchSize,
+			wantBytes:     []byte("de123"),
+			wantPoolInUse: 3, // reader buf + copy buf + large read buf
+		},
+		{
+			name:      "fail_1_byte_from_empty_buf_EOF",
+			readBytes: 1,
+			wantErr:   io.ErrUnexpectedEOF,
+		},
+		{
+			name:       "fail_EOF_in_buf_fill",
+			readerData: "a",
+			readBytes:  2,
+			wantErr:    io.ErrUnexpectedEOF,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool := newCountingBufferPool(t)
+			br := newBufReader(batchSize, utilizationFactor, pool, strings.NewReader(tt.readerData))
+			defer br.close()
+			if tt.setupRead > 0 {
+				p := make([]byte, tt.setupRead)
+				if _, err := br.Read(p); err != nil {
+					t.Fatalf("setup Read failed: %v", err)
+				}
+			}
+
+			bufs, err := br.readExact(tt.readBytes, nil)
+			defer bufs.Free()
+
+			if err != tt.wantErr {
+				t.Fatalf("readExact(%d) returned error %v, want %v", tt.readBytes, err, tt.wantErr)
+			}
+			if err != nil {
+				return
+			}
+
+			if got := bufs.Materialize(); !bytes.Equal(got, tt.wantBytes) {
+				t.Errorf("readExact(%d) returned bytes %v, want %v", tt.readBytes, got, tt.wantBytes)
+			}
+			if br.freeBufferOnReset != tt.wantFreeBufferOnReset {
+				t.Errorf("br.freeBufferOnReset = %v, want %v", br.freeBufferOnReset, tt.wantFreeBufferOnReset)
+			}
+			if pool.InUse() != tt.wantPoolInUse {
+				t.Errorf("pool in use: got %d, want %d", pool.InUse(), tt.wantPoolInUse)
+			}
+		})
+	}
+}
+
 func BenchmarkReadLarge(b *testing.B) {
 	const readSize = 16 * 1024
 	const dataSize = 1024 * 1024
@@ -459,12 +648,12 @@ func BenchmarkReadLarge(b *testing.B) {
 				br.bufObj.Free()
 				br.buf = nil
 			}
-			br.utilizationTargetMet = false
+			br.freeBufferOnReset = false
 			var bufs mem.BufferSlice
 
 			for {
 				var err error
-				bufs, err = br.readLarge(readSize, bufs[:0])
+				bufs, err = br.readExact(readSize, bufs[:0])
 				bufs.Free()
 				if err == io.EOF {
 					break
