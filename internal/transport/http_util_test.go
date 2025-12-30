@@ -607,23 +607,45 @@ func (s) TestBufReaderReadExact(t *testing.T) {
 func BenchmarkReadLarge(b *testing.B) {
 	const readSize = 16 * 1024
 	const dataSize = 1024 * 1024
-	data := bytes.Repeat([]byte{'a'}, dataSize)
-	b.SetBytes(int64(dataSize))
+	const bufSize = 32 * 1024
+
+	data := bytes.Repeat([]byte{'a'}, 2*bufSize)
 	b.ReportAllocs()
+
+	ln, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			for {
+				if _, err := c.Write(data); err != nil {
+					// This is likely a broken pipe if the client exits early.
+					break
+				}
+			}
+		}
+	}()
 
 	b.Run("reader=bufio", func(b *testing.B) {
 		p := make([]byte, readSize)
-		rd := bytes.NewReader(data)
-		r := bufio.NewReaderSize(rd, 32*1024)
+		r := bufio.NewReaderSize(strings.NewReader(""), bufSize)
+		conn, err := net.Dial(ln.Addr().Network(), ln.Addr().String())
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer conn.Close()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			rd.Seek(0, 0)
-			r.Reset(rd)
-			for {
+			r.Reset(conn)
+			for j := 0; j < dataSize; j += readSize {
 				_, err := io.ReadFull(r, p)
-				if err == io.EOF {
-					break
-				}
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -632,36 +654,25 @@ func BenchmarkReadLarge(b *testing.B) {
 	})
 	b.Run("reader=bufReader", func(b *testing.B) {
 		pool := mem.DefaultBufferPool()
-		rd := bytes.NewReader(data)
-		br := &bufReader{
-			rd:        rd,
-			batchSize: 32 * 1024,
-			pool:      pool,
+		var bufs mem.BufferSlice
+		conn, err := net.Dial(ln.Addr().Network(), ln.Addr().String())
+		if err != nil {
+			b.Fatal(err)
 		}
+		defer conn.Close()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			rd.Seek(0, 0)
-			br.r = 0
-			br.w = 0
-			br.err = nil
-			if br.buf != nil {
-				br.bufObj.Free()
-				br.buf = nil
-			}
-			br.freeBufferOnReset = false
-			var bufs mem.BufferSlice
+			br := newBufReader(bufSize, 4, pool, conn)
+			fmt.Println(br.utilizationThreshold)
 
-			for {
-				var err error
+			for read := 0; read < dataSize; read += readSize {
 				bufs, err = br.readExact(readSize, bufs[:0])
 				bufs.Free()
-				if err == io.EOF {
-					break
-				}
 				if err != nil {
 					b.Fatal(err)
 				}
 			}
+			br.close()
 		}
 	})
 }

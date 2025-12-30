@@ -223,14 +223,10 @@ func (b *buffer) slice(start, end int) Buffer {
 		b.refs.Add(1)
 		return b
 	}
-	if size := end - start; IsBelowBufferPoolingThreshold(size) {
-		buf := make(SliceBuffer, size)
-		copy(buf, b.data[start:end])
-		return buf
-	}
 	// We are creating a new reference (view) to a portion of the root buffer's
 	// data. Therefore, we must increment the reference count of the root buffer
-	// to ensure the underlying data is not freed while this view is still in use.
+	// to ensure the underlying data is not freed while this view is still in
+	// use.
 	b.rootBuf.Ref()
 	view := newBuffer()
 	view.data = b.data[start:end]
