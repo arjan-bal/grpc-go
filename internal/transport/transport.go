@@ -380,6 +380,7 @@ func (s *Stream) ReadMessageHeader(header []byte) (err error) {
 
 // Read reads n bytes from the wire for this stream.
 func (s *Stream) read(n int) (data mem.BufferSlice, err error) {
+	data = make(mem.BufferSlice, 0, (n+http2MaxFrameLen-1)/http2MaxFrameLen*2)
 	// Don't request a read if there was an error earlier
 	if er := s.trReader.er; er != nil {
 		return nil, er
