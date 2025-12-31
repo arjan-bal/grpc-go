@@ -787,6 +787,23 @@ func (f *framer) readDataFrame(fh http2.FrameHeader) (err error) {
 		buf := make([]byte, payloadLen)
 		_, err = io.ReadFull(f.reader, buf)
 		payload = append(payload, mem.SliceBuffer(buf))
+	} else if payloadLen+padSize < http2MaxFrameLen && f.reader.Buffered() < payloadLen {
+		// The protobuf codec requires a single contiguous slice for
+		// unmarshalling (see https://github.com/golang/protobuf/issues/609). If
+		// a frame is small enough to fit in one slice but currently fragmented
+		// in the reader, returning multiple buffers triggers a "gather" copy in
+		// the codec.
+		//
+		// It is cheaper to copy the data into a single contiguous buffer now
+		// than to incur the overhead of `readExact` (atomic refcounts and slice
+		// management) only to force the codec to copy it anyway.
+		//
+		// We skip this logic for max-sized frames (http2MaxFrameLen) because
+		// they are likely part of a larger message that is inherently
+		// fragmented.
+		buf := f.pool.Get(payloadLen)
+		_, err = io.ReadFull(f.reader, *buf)
+		payload = append(payload, mem.NewBuffer(buf, f.pool))
 	} else {
 		payload, err = f.reader.readExact(payloadLen, payload)
 	}
