@@ -379,11 +379,11 @@ func (w *bufWriter) flushKeepBuffer() error {
 }
 
 type bufReader struct {
-	r                    int
-	w                    int
-	bufSize              int
-	utilizationThreshold int
-	pool                 mem.BufferPool
+	r                         int
+	w                         int
+	bufSize                   int
+	utilizationThresholdBytes int
+	pool                      mem.BufferPool
 	// bufObj hold a reference to the buffer. It is set to nil when the reader
 	// switches to using a fresh buffer.
 	bufObj mem.Buffer
@@ -410,10 +410,10 @@ type bufReader struct {
 // deserialization.
 func newBufReader(bufSize int, minUtilizationFactor int, pool mem.BufferPool, reader io.Reader) *bufReader {
 	return &bufReader{
-		bufSize:              max(0, bufSize),
-		pool:                 pool,
-		rd:                   reader,
-		utilizationThreshold: (bufSize + minUtilizationFactor - 1) / minUtilizationFactor,
+		bufSize:                   max(0, bufSize),
+		pool:                      pool,
+		rd:                        reader,
+		utilizationThresholdBytes: (bufSize + minUtilizationFactor - 1) / minUtilizationFactor,
 	}
 }
 
@@ -527,9 +527,9 @@ func (b *bufReader) readExact(requestedBytes int, res mem.BufferSlice) (mem.Buff
 	}
 
 	if consumable := min(b.Buffered(), requestedBytes); consumable > 0 {
-		// If the buffer is already sliced or the current data meets the
-		// utilization threshold, take ownership of the buffer.
-		if b.freeBufferOnReset || consumable >= b.utilizationThreshold {
+		// If the current data meets the utilization threshold, give a view into
+		// the buffer to avoid a copy.
+		if consumable >= b.utilizationThresholdBytes {
 			res = append(res, mem.Slice(b.bufObj, b.r, b.r+consumable))
 			b.freeBufferOnReset = true
 		} else {
@@ -574,7 +574,7 @@ func (b *bufReader) readExact(requestedBytes int, res mem.BufferSlice) (mem.Buff
 		return res, b.readErr()
 	}
 
-	if requestedBytes >= b.utilizationThreshold {
+	if requestedBytes >= b.utilizationThresholdBytes {
 		// Take ownership.
 		res = append(res, mem.Slice(b.bufObj, 0, requestedBytes))
 		b.freeBufferOnReset = true
@@ -787,7 +787,7 @@ func (f *framer) readDataFrame(fh http2.FrameHeader) (err error) {
 		buf := make([]byte, payloadLen)
 		_, err = io.ReadFull(f.reader, buf)
 		payload = append(payload, mem.SliceBuffer(buf))
-	} else if payloadLen+padSize < http2MaxFrameLen && f.reader.Buffered() < payloadLen {
+	} else if (payloadLen+padSize < http2MaxFrameLen && f.reader.Buffered() < payloadLen) || payloadLen < f.reader.utilizationThresholdBytes {
 		// The protobuf codec requires a single contiguous slice for
 		// unmarshalling (see https://github.com/golang/protobuf/issues/609). If
 		// a frame is small enough to fit in one slice but currently fragmented
@@ -801,6 +801,9 @@ func (f *framer) readDataFrame(fh http2.FrameHeader) (err error) {
 		// We skip this logic for max-sized frames (http2MaxFrameLen) because
 		// they are likely part of a larger message that is inherently
 		// fragmented.
+		//
+		// Also, if the payload is too small to safely apply the zero-copy
+		// without the risk of pinning too much memory, use the copy route.
 		buf := f.pool.Get(payloadLen)
 		_, err = io.ReadFull(f.reader, *buf)
 		payload = append(payload, mem.NewBuffer(buf, f.pool))
