@@ -230,8 +230,12 @@ type xdsResolver struct {
 	curConfigSelector stoppableConfigSelector
 }
 
-// ResolveNow is a no-op at this point.
-func (*xdsResolver) ResolveNow(resolver.ResolveNowOptions) {}
+// ResolveNow calls RequestDNSReresolution on the dependency manager.
+func (r *xdsResolver) ResolveNow(opts resolver.ResolveNowOptions) {
+	if r.dm != nil {
+		r.dm.RequestDNSReresolution(opts)
+	}
+}
 
 func (r *xdsResolver) Close() {
 	// Cancel the context passed to the serializer and wait for any scheduled
@@ -392,6 +396,7 @@ func (r *xdsResolver) newConfigSelector() (*configSelector, error) {
 
 		cs.routes[i].retryConfig = rt.RetryConfig
 		cs.routes[i].hashPolicies = rt.HashPolicies
+		cs.routes[i].autoHostRewrite = rt.AutoHostRewrite
 	}
 
 	// Account for this config selector's clusters.  Do this after no further

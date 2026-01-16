@@ -72,17 +72,8 @@ func IsBelowBufferPoolingThreshold(size int) bool {
 	return size <= bufferPoolingThreshold
 }
 
-type atomicInt32 struct {
-	atomic.Int32
-	// initialized enables sanity checks without the overhead of atomic
-	// operations. This field is not safe for concurrent access and is used
-	// in a best-effort manner for debugging/assertion purposes only. It does
-	// not play a role in the concurrent logic of reference counting.
-	initialized bool
-}
-
 type buffer struct {
-	refs atomicInt32
+	refs atomic.Int32
 	data []byte
 
 	// rootBuf is the buffer responsible for returning origData to the pool
@@ -123,8 +114,7 @@ func NewBuffer(data *[]byte, pool BufferPool) Buffer {
 	b.data = *data
 	b.pool = pool
 	b.rootBuf = b
-	b.refs.Add(1)
-	b.refs.initialized = true
+	b.refs.Store(1)
 	return b
 }
 
@@ -147,34 +137,27 @@ func Copy(data []byte, pool BufferPool) Buffer {
 }
 
 func (b *buffer) ReadOnlyData() []byte {
-	if !b.refs.initialized {
+	if b.rootBuf == nil {
 		panic("Cannot read freed buffer")
 	}
 	return b.data
 }
 
 func (b *buffer) Ref() {
-	if !b.refs.initialized {
+	if b.refs.Add(1) <= 1 {
 		panic("Cannot ref freed buffer")
 	}
-	b.refs.Add(1)
 }
 
 func (b *buffer) Free() {
-	if !b.refs.initialized {
-		panic("Cannot free freed buffer")
-	}
-
 	refs := b.refs.Add(-1)
-	switch {
-	case refs > 0:
-		return
-	case refs == 0:
-	default:
+	if refs < 0 {
 		panic("Cannot free freed buffer")
 	}
+	if refs > 0 {
+		return
+	}
 
-	b.refs.initialized = false
 	b.data = nil
 	if b.rootBuf == b {
 		// This buffer is the owner of the data slice and its ref count reached
@@ -199,16 +182,14 @@ func (b *buffer) Len() int {
 }
 
 func (b *buffer) split(n int) (Buffer, Buffer) {
-	if !b.refs.initialized {
+	if b.rootBuf == nil || b.rootBuf.refs.Add(1) <= 1 {
 		panic("Cannot split freed buffer")
 	}
 
-	b.rootBuf.Ref()
 	split := newBuffer()
 	split.data = b.data[n:]
 	split.rootBuf = b.rootBuf
-	split.refs.initialized = true
-	split.refs.Add(1)
+	split.refs.Store(1)
 
 	b.data = b.data[:n]
 
@@ -216,7 +197,7 @@ func (b *buffer) split(n int) (Buffer, Buffer) {
 }
 
 func (b *buffer) slice(start, end int) Buffer {
-	if !b.refs.initialized {
+	if b.rootBuf == nil {
 		panic("Cannot get slice of a freed buffer")
 	}
 	if end-start == len(b.data) {
@@ -227,18 +208,19 @@ func (b *buffer) slice(start, end int) Buffer {
 	// data. Therefore, we must increment the reference count of the root buffer
 	// to ensure the underlying data is not freed while this view is still in
 	// use.
-	b.rootBuf.Ref()
+	if b.rootBuf.refs.Add(1) <= 1 {
+		panic("Cannot get slice of a freed buffer")
+	}
 	view := newBuffer()
 	view.data = b.data[start:end]
 	view.rootBuf = b.rootBuf
-	view.refs.initialized = true
-	view.refs.Add(1)
+	view.refs.Store(1)
 
 	return view
 }
 
 func (b *buffer) read(buf []byte) (int, Buffer) {
-	if !b.refs.initialized {
+	if b.rootBuf == nil {
 		panic("Cannot read freed buffer")
 	}
 

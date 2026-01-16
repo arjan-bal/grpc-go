@@ -21,6 +21,7 @@ package clusterresolver
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 
 	"google.golang.org/grpc/internal/balancer/weight"
@@ -265,10 +266,13 @@ func priorityLocalitiesToClusterImpl(localities []xdsresource.Locality, priority
 			if endpoint.HealthStatus != xdsresource.EndpointHealthStatusHealthy && endpoint.HealthStatus != xdsresource.EndpointHealthStatusUnknown {
 				continue
 			}
-			resolverEndpoint := resolver.Endpoint{}
-			for _, as := range endpoint.Addresses {
-				resolverEndpoint.Addresses = append(resolverEndpoint.Addresses, resolver.Address{Addr: as})
-			}
+
+			// Create a copy of endpoint.ResolverEndpoint to avoid race between
+			// the xDS Client (which owns this shared object in its cache) and
+			// the Cluster Resolver (which is trying to modify attributes).
+			resolverEndpoint := endpoint.ResolverEndpoint
+			resolverEndpoint.Addresses = slices.Clone(endpoint.ResolverEndpoint.Addresses)
+
 			resolverEndpoint = hierarchy.SetInEndpoint(resolverEndpoint, []string{priorityName, localityStr})
 			resolverEndpoint = xdsinternal.SetLocalityIDInEndpoint(resolverEndpoint, locality.ID)
 			// "To provide the xds_wrr_locality load balancer information about
@@ -276,7 +280,7 @@ func priorityLocalitiesToClusterImpl(localities []xdsresource.Locality, priority
 			// populate a new locality weight attribute for each address The
 			// attribute will have the weight (as an integer) of the locality
 			// the address is part of." - A52
-			resolverEndpoint = wrrlocality.SetAddrInfoInEndpoint(resolverEndpoint, wrrlocality.AddrInfo{LocalityWeight: lw})
+			resolverEndpoint = wrrlocality.SetAddrInfo(resolverEndpoint, wrrlocality.AddrInfo{LocalityWeight: lw})
 			var ew uint32 = 1
 			if endpoint.Weight != 0 {
 				ew = endpoint.Weight
