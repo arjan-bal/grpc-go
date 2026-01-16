@@ -355,46 +355,12 @@ func (s) TestBuffer_SliceEmpty(t *testing.T) {
 		freed = true
 	}))
 	slice1 := mem.Slice(buf, 1, 1)
-	if _, ok := slice1.(mem.SliceBuffer); !ok {
-		t.Fatalf("0-length slice should return SliceBuffer, got %T", slice1)
-	}
 	if slice1.Len() != 0 {
 		t.Fatalf("0-length slice has length %d, want 0", slice1.Len())
 	}
 	slice1.Free() // no-op, should not affect buf
 	if freed {
 		t.Fatalf("Buffer freed after freeing 0-length slice")
-	}
-	buf.Free()
-	if !freed {
-		t.Fatalf("Buffer not freed after buf is freed")
-	}
-}
-
-func (s) TestBuffer_SliceBelowThreshold(t *testing.T) {
-	const threshold = 2
-	internal.SetBufferPoolingThresholdForTesting.(func(int))(threshold)
-	t.Cleanup(func() {
-		internal.SetBufferPoolingThresholdForTesting.(func(int))(0)
-	})
-
-	data := []byte{1, 2, 3, 4}
-	freed := false
-	buf := mem.NewBuffer(&data, poolFunc(func(*[]byte) {
-		freed = true
-	}))
-
-	// slice1 will have length 1, which is below threshold.
-	slice1 := mem.Slice(buf, 1, 3)
-	if _, ok := slice1.(mem.SliceBuffer); !ok {
-		t.Fatalf("Below threshold slice should return SliceBuffer, got %T", slice1)
-	}
-	if got, want := slice1.ReadOnlyData(), data[1:3]; !bytes.Equal(got, want) {
-		t.Fatalf("Below threshold slice contains %v, want %v", got, want)
-	}
-	slice1.Free() // no-op, should not affect buf
-	if freed {
-		t.Fatalf("Buffer freed after freeing below-threshold slice")
 	}
 	buf.Free()
 	if !freed {

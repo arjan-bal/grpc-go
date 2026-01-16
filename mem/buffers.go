@@ -200,6 +200,9 @@ func (b *buffer) slice(start, end int) Buffer {
 	if b.rootBuf == nil {
 		panic("Cannot get slice of a freed buffer")
 	}
+	if end == start {
+		return emptyBuffer{}
+	}
 	if end-start == len(b.data) {
 		b.refs.Add(1)
 		return b

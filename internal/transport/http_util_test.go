@@ -262,7 +262,7 @@ func (s) TestWriteBadConnection(t *testing.T) {
 	// Configure the bufWriter with a batchsize that results in data being flushed
 	// to the underlying conn, midway through Write().
 	writeBufferSize := (len(data) - 1) / 2
-	writer := newBufWriter(&badNetworkConn{}, writeBufferSize, getWriteBufferPool(writeBufferSize))
+	writer := newBufWriter(&badNetworkConn{}, writeBufferSize, getBufferPool(writeBufferSize))
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -418,7 +418,7 @@ func (s) TestFramer_ParseDataFrame(t *testing.T) {
 }
 
 func (s) TestBufReaderRead(t *testing.T) {
-	br := newBufReader(3, minReadBufferUtilizationFactor, mem.DefaultBufferPool(), strings.NewReader("abcdef"))
+	br := newBufReader(strings.NewReader("abcdef"), 3, minReadBufferUtilizationFactor, mem.DefaultBufferPool())
 	buf := make([]byte, 2)
 	n, err := br.Read(buf) // buf="ab", br.buf="abc", r=2, w=3
 	if err != nil || n != 2 || string(buf) != "ab" {
@@ -445,7 +445,7 @@ func (s) TestBufReaderRead(t *testing.T) {
 }
 
 func (s) TestBufReaderReadLarge(t *testing.T) {
-	br := newBufReader(3, minReadBufferUtilizationFactor, mem.DefaultBufferPool(), strings.NewReader("abcdef"))
+	br := newBufReader(strings.NewReader("abcdef"), 3, minReadBufferUtilizationFactor, mem.DefaultBufferPool())
 	buf := make([]byte, 4)
 	n, err := br.Read(buf)
 	if err != nil || n != 4 || string(buf) != "abcd" {
@@ -572,7 +572,7 @@ func (s) TestBufReaderReadExact(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pool := newCountingBufferPool(t)
-			br := newBufReader(batchSize, utilizationFactor, pool, strings.NewReader(tt.readerData))
+			br := newBufReader(strings.NewReader(tt.readerData), batchSize, utilizationFactor, pool)
 			defer br.close()
 			if tt.setupRead > 0 {
 				p := make([]byte, tt.setupRead)
@@ -662,9 +662,7 @@ func BenchmarkReadLarge(b *testing.B) {
 		defer conn.Close()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			br := newBufReader(bufSize, 4, pool, conn)
-			fmt.Println(br.utilizationThreshold)
-
+			br := newBufReader(conn, bufSize, 4, pool)
 			for read := 0; read < dataSize; read += readSize {
 				bufs, err = br.readExact(readSize, bufs[:0])
 				bufs.Free()

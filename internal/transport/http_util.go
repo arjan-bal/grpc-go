@@ -305,7 +305,7 @@ func decodeGrpcMessageUnchecked(msg string) string {
 }
 
 type bufWriter struct {
-	pool      *sync.Pool
+	pool      mem.BufferPool
 	buf       []byte
 	offset    int
 	batchSize int
@@ -313,7 +313,7 @@ type bufWriter struct {
 	err       error
 }
 
-func newBufWriter(conn io.Writer, batchSize int, pool *sync.Pool) *bufWriter {
+func newBufWriter(conn io.Writer, batchSize int, pool mem.BufferPool) *bufWriter {
 	w := &bufWriter{
 		batchSize: batchSize,
 		conn:      conn,
@@ -335,7 +335,7 @@ func (w *bufWriter) Write(b []byte) (int, error) {
 		return n, toIOError(err)
 	}
 	if w.buf == nil {
-		b := w.pool.Get().(*[]byte)
+		b := w.pool.Get(w.batchSize)
 		w.buf = *b
 	}
 	written := 0
@@ -408,7 +408,7 @@ type bufReader struct {
 // Setting a high minUtilizationFactor will result in fewer copies, but may
 // result in higher memory usage when awaiting data to complete message
 // deserialization.
-func newBufReader(bufSize int, minUtilizationFactor int, pool mem.BufferPool, reader io.Reader) *bufReader {
+func newBufReader(reader io.Reader, bufSize int, minUtilizationFactor int, pool mem.BufferPool) *bufReader {
 	return &bufReader{
 		bufSize:                   max(0, bufSize),
 		pool:                      pool,
@@ -648,17 +648,79 @@ type framer struct {
 	errDetail   error
 }
 
-var writeBufferPoolMap = make(map[int]*sync.Pool)
-var writeBufferMutex sync.Mutex
+// simpleBufferPool is a buffer pool that pools buffers of a fixed size.
+// It panics if the requested size differs from the initialized size.
+type simpleBufferPool struct {
+	pool       *sync.Pool
+	bufferSize int
+}
+
+func newSimpleBufferPool(size int) *simpleBufferPool {
+	return &simpleBufferPool{
+		bufferSize: size,
+		pool: &sync.Pool{
+			New: func() any {
+				buf := make([]byte, size)
+				return &buf
+			},
+		},
+	}
+}
+
+func (p *simpleBufferPool) Get(size int) *[]byte {
+	if size != p.bufferSize {
+		panic(fmt.Sprintf("Buffer of unexpected size requested: %d, want %d", size, p.bufferSize))
+	}
+	buf := p.pool.Get().(*[]byte)
+	*buf = (*buf)[:size]
+	return buf
+}
+
+func (p *simpleBufferPool) Put(buf *[]byte) {
+	if size := cap(*buf); size != p.bufferSize {
+		panic(fmt.Sprintf("Buffer of unexpected size returned: %d, want %d", size, p.bufferSize))
+	}
+	p.pool.Put(buf)
+}
+
+var sizedBufferPoolMap = make(map[int]*simpleBufferPool)
+var bufferPoolMutex sync.Mutex
+
+type aggregatePool struct {
+	primaryPool   *simpleBufferPool
+	secondaryPool mem.BufferPool
+}
+
+func (p *aggregatePool) Get(size int) *[]byte {
+	if p.primaryPool.bufferSize == size {
+		return p.primaryPool.Get(size)
+	}
+	return p.secondaryPool.Get(size)
+}
+
+func (p *aggregatePool) Put(b *[]byte) {
+	if size := cap(*b); size == p.primaryPool.bufferSize {
+		p.primaryPool.Put(b)
+		return
+	}
+	p.secondaryPool.Put(b)
+}
 
 func newFramer(conn io.ReadWriter, writeBufferSize, readBufferSize int, sharedWriteBuffer bool, maxHeaderListSize uint32, memPool mem.BufferPool) *framer {
 	if writeBufferSize < 0 {
 		writeBufferSize = 0
 	}
-	r := newBufReader(readBufferSize, minReadBufferUtilizationFactor, memPool, conn)
-	var pool *sync.Pool
+	if readBufferSize > 0 {
+		memPool = &aggregatePool{
+			primaryPool:   getBufferPool(readBufferSize),
+			secondaryPool: memPool,
+		}
+	}
+
+	r := newBufReader(conn, readBufferSize, minReadBufferUtilizationFactor, memPool)
+	var pool mem.BufferPool
 	if sharedWriteBuffer {
-		pool = getWriteBufferPool(writeBufferSize)
+		pool = getBufferPool(writeBufferSize)
 	}
 	w := newBufWriter(conn, writeBufferSize, pool)
 	f := &framer{
@@ -837,20 +899,15 @@ func (df *parsedDataFrame) Header() http2.FrameHeader {
 	return df.FrameHeader
 }
 
-func getWriteBufferPool(size int) *sync.Pool {
-	writeBufferMutex.Lock()
-	defer writeBufferMutex.Unlock()
-	pool, ok := writeBufferPoolMap[size]
+func getBufferPool(size int) *simpleBufferPool {
+	bufferPoolMutex.Lock()
+	defer bufferPoolMutex.Unlock()
+	pool, ok := sizedBufferPoolMap[size]
 	if ok {
 		return pool
 	}
-	pool = &sync.Pool{
-		New: func() any {
-			b := make([]byte, size)
-			return &b
-		},
-	}
-	writeBufferPoolMap[size] = pool
+	pool = newSimpleBufferPool(size)
+	sizedBufferPoolMap[size] = pool
 	return pool
 }
 

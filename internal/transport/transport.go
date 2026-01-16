@@ -389,7 +389,6 @@ func ceil(numerator, denominator int) int {
 
 // Read reads n bytes from the wire for this stream.
 func (s *Stream) read(n int) (data mem.BufferSlice, err error) {
-	data = make(mem.BufferSlice, 0, (n+http2MaxFrameLen-1)/http2MaxFrameLen*2)
 	// Don't request a read if there was an error earlier
 	if er := s.trReader.er; er != nil {
 		return nil, er
@@ -400,7 +399,7 @@ func (s *Stream) read(n int) (data mem.BufferSlice, err error) {
 	// capacity to 128 frames (2MB) to prevent over-allocation or panics
 	// when reading extremely large streams.
 	allocCap := min(ceil(n, http2MaxFrameLen), 128)
-	data = make(mem.BufferSlice, 0, allocCap)
+	data = make(mem.BufferSlice, 0, 2*allocCap)
 	s.readRequester.requestRead(n)
 	for n != 0 {
 		buf, err := s.trReader.Read(n)
