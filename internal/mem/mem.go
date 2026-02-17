@@ -69,8 +69,17 @@ type BinaryTieredBufferPool struct {
 
 func NewBinaryTieredBufferPool(powerOfTwoExponents ...uint8) (*BinaryTieredBufferPool, error) {
 	return newBinaryTiered(func(size int) bufferPool {
-		return newSizedBufferPool(size)
-	}, &simpleBufferPool{}, powerOfTwoExponents...)
+		return newSizedBufferPool(size, true)
+	}, &simpleBufferPool{shouldZero: true}, powerOfTwoExponents...)
+}
+
+// NewDirtyBinaryTieredBufferPool returns a BufferPool backed by multiple
+// sub-pools. It is similar to NewBinaryTieredBufferPool but it does not
+// initialize the buffers before returning them.
+func NewDirtyBinaryTieredBufferPool(powerOfTwoExponents ...uint8) (*BinaryTieredBufferPool, error) {
+	return newBinaryTiered(func(size int) bufferPool {
+		return newSizedBufferPool(size, false)
+	}, &simpleBufferPool{shouldZero: false}, powerOfTwoExponents...)
 }
 
 func newBinaryTiered(newSizedBufferPool func(int) bufferPool, fallbackPool bufferPool, powerOfTwoExponents ...uint8) (*BinaryTieredBufferPool, error) {
@@ -206,6 +215,7 @@ func (NopBufferPool) Put(*[]byte) {
 type sizedBufferPool struct {
 	pool        sync.Pool
 	defaultSize int
+	shouldZero  bool
 }
 
 func (p *sizedBufferPool) Get(size int) *[]byte {
@@ -215,7 +225,9 @@ func (p *sizedBufferPool) Get(size int) *[]byte {
 		return &buf
 	}
 	b := *buf
-	clear(b[:cap(b)])
+	if p.shouldZero {
+		clear(b[:cap(b)])
+	}
 	*buf = b[:size]
 	return buf
 }
@@ -230,9 +242,10 @@ func (p *sizedBufferPool) Put(buf *[]byte) {
 	p.pool.Put(buf)
 }
 
-func newSizedBufferPool(size int) *sizedBufferPool {
+func newSizedBufferPool(size int, zero bool) *sizedBufferPool {
 	return &sizedBufferPool{
 		defaultSize: size,
+		shouldZero:  zero,
 	}
 }
 
@@ -249,10 +262,11 @@ func NewTieredBufferPool(poolSizes ...int) *TieredBufferPool {
 	sort.Ints(poolSizes)
 	pools := make([]*sizedBufferPool, len(poolSizes))
 	for i, s := range poolSizes {
-		pools[i] = newSizedBufferPool(s)
+		pools[i] = newSizedBufferPool(s, true)
 	}
 	return &TieredBufferPool{
-		sizedPools: pools,
+		sizedPools:   pools,
+		fallbackPool: simpleBufferPool{shouldZero: true},
 	}
 }
 
@@ -281,13 +295,16 @@ func (p *TieredBufferPool) getPool(size int) bufferPool {
 // acquire a buffer from the pool but if that buffer is too small, it returns it
 // to the pool and creates a new one.
 type simpleBufferPool struct {
-	pool sync.Pool
+	pool       sync.Pool
+	shouldZero bool
 }
 
 func (p *simpleBufferPool) Get(size int) *[]byte {
 	bs, ok := p.pool.Get().(*[]byte)
 	if ok && cap(*bs) >= size {
-		clear((*bs)[:cap(*bs)])
+		if p.shouldZero {
+			clear((*bs)[:cap(*bs)])
+		}
 		*bs = (*bs)[:size]
 		return bs
 	}
