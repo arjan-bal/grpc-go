@@ -16,7 +16,8 @@
  *
  */
 
-// Package mem provides a tiered buffer pool implementation for efficient memory management.
+// Package mem provides utilities that facilitate memory reuse in byte slices
+// that are used as buffers.
 package mem
 
 import (
@@ -46,7 +47,8 @@ type bufferPool interface {
 	Put(*[]byte)
 }
 
-// BinaryTieredBufferPool is a buffer pool that uses multiple sub-pools with power-of-two sizes.
+// BinaryTieredBufferPool is a buffer pool that uses multiple sub-pools with
+// power-of-two sizes.
 type BinaryTieredBufferPool struct {
 	// exponentToNextLargestPoolMap maps a power-of-two exponent (e.g., 12 for
 	// 4KB) to the index of the next largest sizedBufferPool. This is used by
@@ -74,7 +76,7 @@ func NewBinaryTieredBufferPool(powerOfTwoExponents ...uint8) (*BinaryTieredBuffe
 
 	// Determine the maximum exponent we need to support. This depends on the
 	// word size (32-bit vs 64-bit).
-	maxExponent := uintSize - 1
+	maxExponent := uintSize - 2
 	indexOfNextLargestBit := slices.Repeat([]int{-1}, maxExponent+1)
 	indexOfPreviousLargestBit := slices.Repeat([]int{-1}, maxExponent+1)
 

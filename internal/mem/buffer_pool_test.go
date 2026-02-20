@@ -41,25 +41,25 @@ func TestNewBinaryTieredBufferPool_WordSize(t *testing.T) {
 		{
 			name:      "32-bit_valid_exponent",
 			wordSize:  32,
-			exponents: []uint8{31},
+			exponents: []uint8{30},
 			wantErr:   false,
 		},
 		{
 			name:      "32-bit_invalid_exponent",
 			wordSize:  32,
-			exponents: []uint8{32},
+			exponents: []uint8{31},
 			wantErr:   true,
 		},
 		{
 			name:      "64-bit_valid_exponent",
 			wordSize:  64,
-			exponents: []uint8{63},
+			exponents: []uint8{62},
 			wantErr:   false,
 		},
 		{
 			name:      "64-bit_invalid_exponent",
 			wordSize:  64,
-			exponents: []uint8{64},
+			exponents: []uint8{63},
 			wantErr:   true,
 		},
 	}
