@@ -36,8 +36,10 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/examples/data"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	pb "google.golang.org/grpc/examples/route_guide/routeguide"
@@ -57,6 +59,7 @@ type routeGuideServer struct {
 
 	mu         sync.Mutex // protects routeNotes
 	routeNotes map[string][]*pb.RouteNote
+	shutdownCh chan (struct{})
 }
 
 // GetFeature returns the feature at the given point.
@@ -91,30 +94,42 @@ func (s *routeGuideServer) RecordRoute(stream pb.RouteGuide_RecordRouteServer) e
 	var pointCount, featureCount, distance int32
 	var lastPoint *pb.Point
 	startTime := time.Now()
-	for {
-		point, err := stream.Recv()
-		if err == io.EOF {
-			endTime := time.Now()
-			return stream.SendAndClose(&pb.RouteSummary{
-				PointCount:   pointCount,
-				FeatureCount: featureCount,
-				Distance:     distance,
-				ElapsedTime:  int32(endTime.Sub(startTime).Seconds()),
-			})
-		}
-		if err != nil {
-			return err
-		}
-		pointCount++
-		for _, feature := range s.savedFeatures {
-			if proto.Equal(feature.Location, point) {
-				featureCount++
+	errCh := make(chan error, 1)
+	go func() {
+		for {
+			point, err := stream.Recv()
+			if err == io.EOF {
+				endTime := time.Now()
+				errCh <- stream.SendAndClose(&pb.RouteSummary{
+					PointCount:   pointCount,
+					FeatureCount: featureCount,
+					Distance:     distance,
+					ElapsedTime:  int32(endTime.Sub(startTime).Seconds()),
+				})
+				return
 			}
+			if err != nil {
+				errCh <- err
+				return
+			}
+			pointCount++
+			for _, feature := range s.savedFeatures {
+				if proto.Equal(feature.Location, point) {
+					featureCount++
+				}
+			}
+			if lastPoint != nil {
+				distance += calcDistance(lastPoint, point)
+			}
+			lastPoint = point
 		}
-		if lastPoint != nil {
-			distance += calcDistance(lastPoint, point)
-		}
-		lastPoint = point
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-s.shutdownCh:
+		return status.Errorf(codes.Canceled, "Server is shutting down")
 	}
 }
 
@@ -236,7 +251,14 @@ func main() {
 		opts = []grpc.ServerOption{grpc.Creds(creds)}
 	}
 	grpcServer := grpc.NewServer(opts...)
-	pb.RegisterRouteGuideServer(grpcServer, newServer())
+	server := newServer()
+	server.shutdownCh = make(chan struct{})
+	go func() {
+		<-time.After(5 * time.Second)
+		fmt.Println("Shutting down server")
+		close(server.shutdownCh)
+	}()
+	pb.RegisterRouteGuideServer(grpcServer, server)
 	grpcServer.Serve(lis)
 }
 

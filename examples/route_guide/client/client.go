@@ -25,6 +25,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	rand "math/rand/v2"
@@ -95,8 +96,12 @@ func runRecordRoute(client pb.RouteGuideClient) {
 	}
 	for _, point := range points {
 		if err := stream.Send(point); err != nil {
-			log.Fatalf("client.RecordRoute: stream.Send(%v) failed: %v", point, err)
+			// Get the RPC status.
+			status := stream.RecvMsg(nil)
+			log.Fatalf("client.RecordRoute: stream.Send(%v) failed: %v, status: %v", point, err, status)
 		}
+		fmt.Println("Client is sleeping")
+		<-time.After(time.Second)
 	}
 	reply, err := stream.CloseAndRecv()
 	if err != nil {
@@ -175,20 +180,20 @@ func main() {
 	client := pb.NewRouteGuideClient(conn)
 
 	// Looking for a valid feature
-	printFeature(client, &pb.Point{Latitude: 409146138, Longitude: -746188906})
+	// printFeature(client, &pb.Point{Latitude: 409146138, Longitude: -746188906})
 
 	// Feature missing.
-	printFeature(client, &pb.Point{Latitude: 0, Longitude: 0})
+	// printFeature(client, &pb.Point{Latitude: 0, Longitude: 0})
 
 	// Looking for features between 40, -75 and 42, -73.
-	printFeatures(client, &pb.Rectangle{
-		Lo: &pb.Point{Latitude: 400000000, Longitude: -750000000},
-		Hi: &pb.Point{Latitude: 420000000, Longitude: -730000000},
-	})
+	// printFeatures(client, &pb.Rectangle{
+	// 	Lo: &pb.Point{Latitude: 400000000, Longitude: -750000000},
+	// 	Hi: &pb.Point{Latitude: 420000000, Longitude: -730000000},
+	// })
 
 	// RecordRoute
 	runRecordRoute(client)
 
 	// RouteChat
-	runRouteChat(client)
+	// runRouteChat(client)
 }
