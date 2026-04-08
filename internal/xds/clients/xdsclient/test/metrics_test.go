@@ -485,6 +485,11 @@ func (s) TestResourceMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	resources = e2e.UpdateOptions{
+		NodeID:         nodeID,
+		Listeners:      []*v3listenerpb.Listener{e2e.DefaultClientListener(listenerName, routeConfigName)},
+		SkipValidation: true,
+	}
 	resources.Listeners[0].ApiListener = nil
 	if err := mgmtServer.Update(ctx, resources); err != nil {
 		t.Fatalf("Failed to update management server: %v", err)
