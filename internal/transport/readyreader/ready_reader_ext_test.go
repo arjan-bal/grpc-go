@@ -16,7 +16,7 @@
  *
  */
 
-package transport
+package readyreader_test
 
 import (
 	"bytes"
@@ -25,12 +25,29 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"google.golang.org/grpc/internal/grpctest"
 	"google.golang.org/grpc/internal/testutils"
+	"google.golang.org/grpc/internal/transport/readyreader"
 	"google.golang.org/grpc/mem"
 )
+
+var (
+	defaultTestTimeout      = 10 * time.Second
+	defaultTestShortTimeout = 10 * time.Millisecond
+)
+
+type s struct {
+	grpctest.Tester
+}
+
+func Test(t *testing.T) {
+	grpctest.RunSubTests(t, s{})
+}
 
 // TestReadyReader_NonRawConn verifies that ReadOnReady correctly reads data
 // from a net.Conn that doesn't support non-memory-pinning reads.
@@ -40,7 +57,7 @@ func (s) TestReadyReader_NonRawConn(t *testing.T) {
 	go writer.Write(data)
 
 	pool := mem.DefaultBufferPool()
-	readyReader := NewReadyReader(reader)
+	readyReader := readyreader.New(reader)
 
 	bufHandle, n, err := readyReader.ReadOnReady(1024, pool)
 	if err != nil {
@@ -83,7 +100,7 @@ func (s) TestReadyReader_EOF(t *testing.T) {
 	defer conn.Close()
 
 	pool := mem.DefaultBufferPool()
-	rr := NewReadyReader(conn)
+	rr := readyreader.New(conn)
 	res, _, err := rr.ReadOnReady(len(data), pool)
 	if err != nil {
 		t.Errorf("Failed to read: %v", err)
@@ -107,6 +124,9 @@ func (s) TestReadyReader_EOF(t *testing.T) {
 }
 
 func (s) TestReadyReader_TCP_Blocking(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("This test is only applicable for Linux, as RawConn functionality is not implemented for non-linux platforms.")
+	}
 	tests := []struct {
 		name string
 		read func(conn net.Conn, pool *trackingBufferPool, readBufSize int) ([]byte, error)
@@ -114,7 +134,7 @@ func (s) TestReadyReader_TCP_Blocking(t *testing.T) {
 		{
 			name: "ReadyReader",
 			read: func(conn net.Conn, pool *trackingBufferPool, readBufSize int) ([]byte, error) {
-				rr := NewReadyReader(conn)
+				rr := readyreader.New(conn)
 				bufHandle, n, err := rr.ReadOnReady(readBufSize, pool)
 				if err != nil {
 					return nil, err
@@ -128,8 +148,8 @@ func (s) TestReadyReader_TCP_Blocking(t *testing.T) {
 		{
 			name: "BufReadyReader",
 			read: func(conn net.Conn, pool *trackingBufferPool, readBufSize int) ([]byte, error) {
-				rr := newNonBlockingReader(conn)
-				bufRR := newBufReadyReader(rr, readBufSize, pool)
+				rr := readyreader.NewNonBlocking(conn)
+				bufRR := readyreader.NewBuffered(rr, readBufSize, pool)
 				buf := make([]byte, 100)
 				n, err := bufRR.Read(buf)
 				if err != nil {
@@ -248,7 +268,7 @@ func (p *trackingBufferPool) Put(b *[]byte) {
 }
 
 // Call Read to accumulate the text of a file
-func reads(buf *bufReadyReader, m int) string {
+func reads(buf io.Reader, m int) string {
 	var b [1000]byte
 	nb := 0
 	for {
@@ -263,16 +283,16 @@ func reads(buf *bufReadyReader, m int) string {
 
 type bufReader struct {
 	name string
-	fn   func(*bufReadyReader) string
+	fn   func(io.Reader) string
 }
 
 var bufreaders = []bufReader{
-	{"1", func(b *bufReadyReader) string { return reads(b, 1) }},
-	{"2", func(b *bufReadyReader) string { return reads(b, 2) }},
-	{"3", func(b *bufReadyReader) string { return reads(b, 3) }},
-	{"4", func(b *bufReadyReader) string { return reads(b, 4) }},
-	{"5", func(b *bufReadyReader) string { return reads(b, 5) }},
-	{"7", func(b *bufReadyReader) string { return reads(b, 7) }},
+	{"1", func(b io.Reader) string { return reads(b, 1) }},
+	{"2", func(b io.Reader) string { return reads(b, 2) }},
+	{"3", func(b io.Reader) string { return reads(b, 3) }},
+	{"4", func(b io.Reader) string { return reads(b, 4) }},
+	{"5", func(b io.Reader) string { return reads(b, 5) }},
+	{"7", func(b io.Reader) string { return reads(b, 7) }},
 }
 
 const minReadBufferSize = 16
@@ -297,8 +317,8 @@ func (s) TestBufReader(t *testing.T) {
 			for _, bufsize := range bufsizes {
 				// We don't use t.Run() here to avoid excessive logging due to
 				// the large number of subtests.
-				read := NewReadyReader(strings.NewReader(text))
-				buf := newBufReadyReader(read, bufsize, mem.DefaultBufferPool())
+				read := readyreader.New(strings.NewReader(text))
+				buf := readyreader.NewBuffered(read, bufsize, mem.DefaultBufferPool())
 				s := bufreader.fn(buf)
 				if s != text {
 					t.Errorf("fn=%s bufsize=%d want=%q got=%q", bufreader.name, bufsize, text, s)
@@ -309,8 +329,8 @@ func (s) TestBufReader(t *testing.T) {
 }
 
 func (s) TestBufReader_ReadEmptyBuffer(t *testing.T) {
-	rr := NewReadyReader(new(bytes.Buffer))
-	l := newBufReadyReader(rr, minReadBufferSize, mem.DefaultBufferPool())
+	rr := readyreader.New(new(bytes.Buffer))
+	l := readyreader.NewBuffered(rr, minReadBufferSize, mem.DefaultBufferPool())
 	b := make([]byte, 100)
 	n, err := l.Read(b)
 	if err != io.EOF {
@@ -336,7 +356,7 @@ func (r *errorThenGoodReader) Read(p []byte) (int, error) {
 
 func (s) TestBufReader_ClearError(t *testing.T) {
 	r := &errorThenGoodReader{}
-	b := newBufReadyReader(NewReadyReader(r), minReadBufferSize, mem.DefaultBufferPool())
+	b := readyreader.NewBuffered(readyreader.New(r), minReadBufferSize, mem.DefaultBufferPool())
 	buf := make([]byte, 1)
 	if _, err := b.Read(nil); err != nil {
 		t.Fatalf("1st nil Read = %v; want nil", err)
@@ -372,7 +392,7 @@ func (s) TestBufReader_ReadZero(t *testing.T) {
 	for _, size := range []int{100, 2} {
 		t.Run(fmt.Sprintf("bufsize=%d", size), func(t *testing.T) {
 			r := io.MultiReader(strings.NewReader("abc"), &emptyThenNonEmptyReader{r: strings.NewReader("def"), n: 1})
-			br := newBufReadyReader(NewReadyReader(r), size, mem.DefaultBufferPool())
+			br := readyreader.NewBuffered(readyreader.New(r), size, mem.DefaultBufferPool())
 			want := func(s string, wantErr error) {
 				p := make([]byte, 50)
 				n, err := br.Read(p)

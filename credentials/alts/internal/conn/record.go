@@ -28,7 +28,7 @@ import (
 
 	core "google.golang.org/grpc/credentials/alts/internal"
 	imem "google.golang.org/grpc/internal/mem"
-	"google.golang.org/grpc/internal/transport"
+	"google.golang.org/grpc/internal/transport/readyreader"
 	"google.golang.org/grpc/mem"
 )
 
@@ -84,7 +84,7 @@ var (
 	readBufPool = imem.NewDirtySimplePool()
 
 	// Compile-time check to ensure conn implements ReadyReader.
-	_ transport.ReadyReader = &conn{}
+	_ readyreader.Reader = &conn{}
 )
 
 func init() {
@@ -115,7 +115,7 @@ func RegisterProtocol(protocol string, f ALTSRecordFunc) error {
 // conn represents a secured connection. It implements the net.Conn interface.
 type conn struct {
 	net.Conn
-	reader transport.ReadyReader
+	reader readyreader.Reader
 	crypto ALTSRecordCrypto
 	// buf holds data that has been read from the connection and decrypted,
 	// but has not yet been returned by Read. It is a sub-slice of protected.
@@ -158,7 +158,7 @@ func NewConn(c net.Conn, side core.Side, recordProtocol string, key []byte, prot
 
 	altsConn := &conn{
 		Conn:               c,
-		reader:             transport.NewReadyReader(c),
+		reader:             readyreader.New(c),
 		crypto:             crypto,
 		payloadLengthLimit: payloadLengthLimit,
 		protectedHandle:    protectedHandle,

@@ -16,7 +16,8 @@
  *
  */
 
-package transport
+// Package readyreader provides utilities to perform non-memory-pinning reads.
+package readyreader
 
 import (
 	"errors"
@@ -27,9 +28,9 @@ import (
 	"google.golang.org/grpc/mem"
 )
 
-// ReadyReader is an optional interface that can be implemented by [net.Conn]
+// Reader is an optional interface that can be implemented by [net.Conn]
 // implementations to enable gRPC to perform non-memory-pinning reads.
-type ReadyReader interface {
+type Reader interface {
 	// ReadOnReady waits for data to arrive, fetches a buffer, and performs a
 	// read. When the underlying IO is readable, it allocates a buffer of size
 	// bufSize from the pool and reads up to bufSize bytes into the buffer.
@@ -108,10 +109,10 @@ func (c *blockingReader) ReadOnReady(bufSize int, pool mem.BufferPool) (*[]byte,
 	return buf, n, nil
 }
 
-// newNonBlockingReader returns a ReadyReader if the passed reader supports
+// NewNonBlocking returns a ReadyReader if the passed reader supports
 // non-memory-pinning reads, else nil.
-func newNonBlockingReader(r io.Reader) ReadyReader {
-	if rr, ok := r.(ReadyReader); ok {
+func NewNonBlocking(r io.Reader) Reader {
+	if rr, ok := r.(Reader); ok {
 		return rr
 	}
 	if !isRawConnSupported() {
@@ -150,11 +151,11 @@ func newNonBlockingReader(r io.Reader) ReadyReader {
 	return nil
 }
 
-// NewReadyReader detects if [syscall.RawConn] is available for
-// non-memory-pinning reads. If [syscall.RawConn] is unavailable, it falls back
-// to using the simpler [net.Conn] interface for reads.
-func NewReadyReader(r io.Reader) ReadyReader {
-	if r := newNonBlockingReader(r); r != nil {
+// New detects if [syscall.RawConn] is available for non-memory-pinning reads.
+// If [syscall.RawConn] is unavailable, it falls back to using the simpler
+// [net.Conn] interface for reads.
+func New(r io.Reader) Reader {
+	if r := NewNonBlocking(r); r != nil {
 		return r
 	}
 	return &blockingReader{reader: r}
@@ -166,15 +167,15 @@ type bufReadyReader struct {
 	buf       *[]byte
 	pool      mem.BufferPool
 	bufSize   int
-	rd        ReadyReader // reader provided by the caller
-	r, w      int         // buf read and write positions
+	rd        Reader // reader provided by the caller
+	r, w      int    // buf read and write positions
 	err       error
 	constPool constBufferPool // stored as a field to avoid heap allocations.
 }
 
-// newBufReadyReader returns a new [bufferedReadyReader] whose buffer has the
+// NewBuffered returns a new [bufferedReadyReader] whose buffer has the
 // specified size. If the argument.
-func newBufReadyReader(rd ReadyReader, size int, pool mem.BufferPool) *bufReadyReader {
+func NewBuffered(rd Reader, size int, pool mem.BufferPool) io.Reader {
 	r := &bufReadyReader{
 		rd:      rd,
 		pool:    pool,

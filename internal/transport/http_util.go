@@ -37,6 +37,7 @@ import (
 	"golang.org/x/net/http2/hpack"
 	"google.golang.org/grpc/codes"
 	imem "google.golang.org/grpc/internal/mem"
+	"google.golang.org/grpc/internal/transport/readyreader"
 	"google.golang.org/grpc/mem"
 )
 
@@ -417,9 +418,9 @@ func newFramer(conn io.ReadWriter, writeBufferSize, readBufferSize int, sharedWr
 	}
 	var r io.Reader = conn
 	if readBufferSize > 0 {
-		if rr := newNonBlockingReader(conn); rr != nil {
+		if rr := readyreader.NewNonBlocking(conn); rr != nil {
 			readPool := getIOBufferPool(readBufferSize)
-			r = newBufReadyReader(rr, readBufferSize, readPool)
+			r = readyreader.NewBuffered(rr, readBufferSize, readPool)
 		} else {
 			r = bufio.NewReaderSize(r, readBufferSize)
 		}
