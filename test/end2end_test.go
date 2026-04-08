@@ -6229,13 +6229,6 @@ func (s) TestLargeTimeout(t *testing.T) {
 }
 
 func testLargeTimeout(t *testing.T, e env) {
-	te := newTest(t, e)
-	te.declareLogNoise("Server.processUnaryRPC failed to write status")
-
-	ts := &funcServer{}
-	te.startServer(ts)
-	defer te.tearDown()
-	tc := testgrpc.NewTestServiceClient(te.clientConn())
 
 	timeouts := []time.Duration{
 		time.Duration(math.MaxInt64), // will be (correctly) converted to
@@ -6244,25 +6237,33 @@ func testLargeTimeout(t *testing.T, e env) {
 	}
 
 	for i, maxTimeout := range timeouts {
-		ts.mu.Lock()
-		ts.unaryCall = func(ctx context.Context, _ *testpb.SimpleRequest) (*testpb.SimpleResponse, error) {
-			deadline, ok := ctx.Deadline()
-			timeout := time.Until(deadline)
-			minTimeout := maxTimeout - 5*time.Second
-			if !ok || timeout < minTimeout || timeout > maxTimeout {
-				t.Errorf("ctx.Deadline() = (now+%v), %v; want [%v, %v], true", timeout, ok, minTimeout, maxTimeout)
-				return nil, status.Error(codes.OutOfRange, "deadline error")
+		func() {
+			te := newTest(t, e)
+			te.declareLogNoise("Server.processUnaryRPC failed to write status")
+
+			ts := &funcServer{
+				unaryCall: func(ctx context.Context, _ *testpb.SimpleRequest) (*testpb.SimpleResponse, error) {
+					deadline, ok := ctx.Deadline()
+					timeout := time.Until(deadline)
+					minTimeout := maxTimeout - 5*time.Second
+					if !ok || timeout < minTimeout || timeout > maxTimeout {
+						t.Errorf("ctx.Deadline() = (now+%v), %v; want [%v, %v], true", timeout, ok, minTimeout, maxTimeout)
+						return nil, status.Error(codes.OutOfRange, "deadline error")
+					}
+					return &testpb.SimpleResponse{}, nil
+				},
 			}
-			return &testpb.SimpleResponse{}, nil
-		}
-		ts.mu.Unlock()
+			te.startServer(ts)
+			defer te.tearDown()
+			tc := testgrpc.NewTestServiceClient(te.clientConn())
 
-		ctx, cancel := context.WithTimeout(context.Background(), maxTimeout)
-		defer cancel()
+			ctx, cancel := context.WithTimeout(context.Background(), maxTimeout)
+			defer cancel()
 
-		if _, err := tc.UnaryCall(ctx, &testpb.SimpleRequest{}); err != nil {
-			t.Errorf("case %v: UnaryCall(_) = _, %v; want _, nil", i, err)
-		}
+			if _, err := tc.UnaryCall(ctx, &testpb.SimpleRequest{}); err != nil {
+				t.Errorf("case %v: UnaryCall(_) = _, %v; want _, nil", i, err)
+			}
+		}()
 	}
 }
 
