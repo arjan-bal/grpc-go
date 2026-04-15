@@ -34,6 +34,7 @@ import (
 	"golang.org/x/net/http2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/internal"
 	"google.golang.org/grpc/internal/channelz"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/mem"
@@ -470,6 +471,7 @@ func (t *transportReader) Read(n int) (mem.Buffer, error) {
 		t.er = err
 		return buf, err
 	}
+	internal.MemBufferedBytes.Add(int64(buf.Len()))
 	t.windowHandler.updateWindow(buf.Len())
 	return buf, nil
 }

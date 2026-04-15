@@ -1033,6 +1033,7 @@ func recv(p *parser, c baseCodec, s recvCompressor, dc Decompressor, m any, maxR
 	if err := c.Unmarshal(data, m); err != nil {
 		return status.Errorf(codes.Internal, "grpc: failed to unmarshal the received message: %v", err)
 	}
+	internal.MemBufferedBytes.Add(-int64(data.Len()))
 
 	return nil
 }
