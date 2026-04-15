@@ -22,13 +22,25 @@ package internal
 
 import (
 	"context"
+	"fmt"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/serviceconfig"
 )
 
+func init() {
+	go func() {
+		for ; ; <-time.After(5 * time.Second) {
+			fmt.Println("Data buffered in gRPC:", MemBufferedBytes.Load())
+		}
+	}()
+}
+
 var (
+	// MemBufferedBytes
+	MemBufferedBytes = atomic.Int64{}
 	// HealthCheckFunc is used to provide client-side LB channel health checking
 	HealthCheckFunc HealthChecker
 	// RegisterClientHealthCheckListener is used to provide a listener for
