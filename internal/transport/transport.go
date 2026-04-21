@@ -399,7 +399,7 @@ func (s *Stream) read(n int) (data mem.BufferSlice, err error) {
 	// buffer to avoid resizing during the read loop, but cap the initial
 	// capacity to 128 frames (2MB) to prevent over-allocation or panics
 	// when reading extremely large streams.
-	allocCap := min(ceil(n, http2MaxFrameLen), 128)
+	allocCap := min(ceil(n, http2MaxLargeFrameLen), 128)
 	data = make(mem.BufferSlice, 0, allocCap)
 	s.readRequester.requestRead(n)
 	for n != 0 {

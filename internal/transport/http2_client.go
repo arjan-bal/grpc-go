@@ -445,6 +445,10 @@ func NewHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 			Val: uint32(t.initialWindowSize),
 		})
 	}
+	ss = append(ss, http2.Setting{
+		ID:  http2.SettingMaxFrameSize,
+		Val: uint32(http2MaxLargeFrameLen),
+	})
 	if opts.MaxHeaderListSize != nil {
 		ss = append(ss, http2.Setting{
 			ID:  http2.SettingMaxHeaderListSize,

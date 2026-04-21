@@ -41,7 +41,8 @@ import (
 
 const (
 	// http2MaxFrameLen specifies the max length of a HTTP2 frame.
-	http2MaxFrameLen = 16384 // 16KB frame
+	http2MaxFrameLen      = 16384           // 16KB frame
+	http2MaxLargeFrameLen = 3 * 1024 * 1024 // 16KB frame
 	// https://httpwg.org/specs/rfc7540.html#SettingValues
 	http2InitHeaderTableSize = 4096
 )
@@ -429,7 +430,7 @@ func newFramer(conn io.ReadWriter, writeBufferSize, readBufferSize int, sharedWr
 		reader: r,
 		pool:   memPool,
 	}
-	f.fr.SetMaxReadFrameSize(http2MaxFrameLen)
+	f.fr.SetMaxReadFrameSize(http2MaxLargeFrameLen)
 	// Opt-in to Frame reuse API on framer to reduce garbage.
 	// Frames aren't safe to read from after a subsequent call to ReadFrame.
 	f.fr.SetReuseFrames()
