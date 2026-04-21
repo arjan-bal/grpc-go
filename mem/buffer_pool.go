@@ -45,6 +45,8 @@ var (
 		14, // 16KB (max HTTP/2 frame size used by gRPC)
 		15, // 32KB (default buffer size for io.Copy)
 		20, // 1MB
+		21, // 2MB
+		22, // 4MB
 	}
 	defaultBufferPool BufferPool
 )
