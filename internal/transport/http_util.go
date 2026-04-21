@@ -42,7 +42,7 @@ import (
 const (
 	// http2MaxFrameLen specifies the max length of a HTTP2 frame.
 	http2MaxFrameLen      = 16384           // 16KB frame
-	http2MaxLargeFrameLen = 3 * 1024 * 1024 // 16KB frame
+	http2MaxLargeFrameLen = 1 * 1024 * 1024 // 1MB frame
 	// https://httpwg.org/specs/rfc7540.html#SettingValues
 	http2InitHeaderTableSize = 4096
 )
