@@ -44,6 +44,10 @@ var (
 		12, // Go page size, 4KB
 		14, // 16KB (max HTTP/2 frame size used by gRPC)
 		15, // 32KB (default buffer size for io.Copy)
+		16,
+		17,
+		18, // 256KB
+		19, // 512KB
 		20, // 1MB
 		21, // 2MB
 	}
