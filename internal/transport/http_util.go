@@ -531,6 +531,7 @@ func (f *framer) readDataFrame(fh http2.FrameHeader) (err error) {
 				f.pool.Put(poolHandle)
 			}
 		}()
+		fmt.Println("Len:", fh.Length, "Cap:", cap(buf), "Usage %:", (int(fh.Length)*100)/cap(buf))
 	} else {
 		buf = make([]byte, int(fh.Length))
 	}
