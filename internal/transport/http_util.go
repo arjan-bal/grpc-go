@@ -507,6 +507,7 @@ func (f *framer) errorDetail() error {
 }
 
 func (f *framer) readDataFrame(fh http2.FrameHeader) (err error) {
+	fmt.Printf("[%p] Reading data frame, streamID %d, size: %d\n", f, fh.StreamID, fh.Length)
 	if fh.StreamID == 0 {
 		// DATA frames MUST be associated with a stream. If a
 		// DATA frame is received whose stream identifier
