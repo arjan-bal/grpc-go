@@ -87,7 +87,7 @@ func printHistogram() {
 	for _, count := range clientStreamCount {
 		hist[count]++
 	}
-	fmt.Printf("Active streams: %d\nhistogram (count:clients): %v\n", len(clientStreamCount), hist)
+	fmt.Printf("Active subchannels: %d\nActive streams histogram (count:clients): %v\n", len(clientStreamCount), hist)
 }
 
 var goAwayLoopyWriterTimeout = 5 * time.Second
