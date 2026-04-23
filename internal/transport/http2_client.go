@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,30 +65,67 @@ import (
 var clientConnectionCounter uint64
 
 var (
-	clientStreamCountMu sync.Mutex
-	clientStreamCount   = make(map[*http2Client]int)
+	clientStreamCountMu  sync.Mutex
+	clientStreamCount    = make(map[*http2Client]int)
+	clientDataBufferSize = make(map[*http2Client]int)
 )
 
 func init() {
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		for range ticker.C {
-			printHistogram()
+			printHistograms()
 		}
 	}()
 }
 
-func printHistogram() {
+func printHistograms() {
 	clientStreamCountMu.Lock()
 	defer clientStreamCountMu.Unlock()
-	if len(clientStreamCount) == 0 {
+
+	if len(clientStreamCount) == 0 && len(clientDataBufferSize) == 0 {
 		return
 	}
-	hist := make(map[int]int)
-	for _, count := range clientStreamCount {
-		hist[count]++
+
+	var b strings.Builder
+
+	if len(clientStreamCount) > 0 {
+		hist := make(map[int]int)
+		for _, count := range clientStreamCount {
+			hist[count]++
+		}
+		fmt.Fprintf(&b, "Active subchannels: %d\nActive streams histogram (count:clients): %v\n", len(clientStreamCount), hist)
 	}
-	fmt.Printf("Active subchannels: %d\nActive streams histogram (count:clients): %v\n", len(clientStreamCount), hist)
+
+	if len(clientDataBufferSize) > 0 {
+		totalBuffered := 0
+		for _, size := range clientDataBufferSize {
+			totalBuffered += size
+		}
+		fmt.Fprintf(&b, "Total client data buffered: %d MB\n", totalBuffered/1024/1024)
+
+		const bucketSize = 1 * 1024 * 1024 // 1MB buckets
+		hist := make(map[int]int)
+		for _, size := range clientDataBufferSize {
+			bucket := size / bucketSize
+			hist[bucket]++
+		}
+
+		// To print the buckets in order
+		var buckets []int
+		for k := range hist {
+			buckets = append(buckets, k)
+		}
+		sort.Ints(buckets)
+
+		fmt.Fprint(&b, "Client buffer data histogram:")
+		for _, bucket := range buckets {
+			fmt.Fprintf(&b, " %d-%dMB:%d", bucket, bucket+1, hist[bucket])
+		}
+		fmt.Fprintln(&b)
+	}
+
+	fmt.Print(b.String())
 }
 
 var goAwayLoopyWriterTimeout = 5 * time.Second
@@ -392,6 +430,7 @@ func NewHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 
 	clientStreamCountMu.Lock()
 	clientStreamCount[t] = 0
+	clientDataBufferSize[t] = 0
 	clientStreamCountMu.Unlock()
 
 	var czSecurity credentials.ChannelzSecurityValue
@@ -1076,6 +1115,7 @@ func (t *http2Client) Close(err error) {
 
 	clientStreamCountMu.Lock()
 	delete(clientStreamCount, t)
+	delete(clientDataBufferSize, t)
 	clientStreamCountMu.Unlock()
 
 	if t.kpDormant {
@@ -1207,6 +1247,10 @@ func (t *http2Client) adjustWindow(s *ClientStream, n uint32) {
 // Window updates will be sent out when the cumulative quota
 // exceeds the corresponding threshold.
 func (t *http2Client) updateWindow(s *ClientStream, n uint32) {
+	// Arjan: Data read
+	clientStreamCountMu.Lock()
+	clientDataBufferSize[t] -= int(n)
+	clientStreamCountMu.Unlock()
 	if w := s.fc.onRead(n); w > 0 {
 		t.controlBuf.put(&outgoingWindowUpdate{streamID: s.id, increment: w})
 	}
@@ -1257,6 +1301,7 @@ func (t *http2Client) handleData(f *parsedDataFrame) {
 			increment: w,
 		})
 	}
+	// Arjan: Data enters buffer
 	if sendBDPPing {
 		// Avoid excessive ping detection (e.g. in an L7 proxy)
 		// by sending a window update prior to the BDP ping.
@@ -1288,6 +1333,9 @@ func (t *http2Client) handleData(f *parsedDataFrame) {
 		}
 		if dataLen > 0 {
 			f.data.Ref()
+			clientStreamCountMu.Lock()
+			clientDataBufferSize[t] += dataLen
+			clientStreamCountMu.Unlock()
 			s.write(recvMsg{buffer: f.data})
 		}
 	}
