@@ -863,6 +863,7 @@ func (t *http2Client) NewStream(ctx context.Context, callHdr *CallHdr, handler s
 		s.id = hdr.streamID
 		s.fc = inFlow{limit: uint32(t.initialWindowSize)}
 		t.activeStreams[s.id] = s
+		fmt.Printf("Client %s, active streams: %d\n", t.address.Addr, len(t.activeStreams))
 		t.mu.Unlock()
 
 		if t.streamQuota > 0 && t.waitingStreams > 0 {
