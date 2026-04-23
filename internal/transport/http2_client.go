@@ -63,6 +63,33 @@ import (
 // atomically.
 var clientConnectionCounter uint64
 
+var (
+	clientStreamCountMu sync.Mutex
+	clientStreamCount   = make(map[*http2Client]int)
+)
+
+func init() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		for range ticker.C {
+			printHistogram()
+		}
+	}()
+}
+
+func printHistogram() {
+	clientStreamCountMu.Lock()
+	defer clientStreamCountMu.Unlock()
+	if len(clientStreamCount) == 0 {
+		return
+	}
+	hist := make(map[int]int)
+	for _, count := range clientStreamCount {
+		hist[count]++
+	}
+	fmt.Printf("Active streams: %d\nhistogram (count:clients): %v\n", len(clientStreamCount), hist)
+}
+
 var goAwayLoopyWriterTimeout = 5 * time.Second
 
 var metadataFromOutgoingContextRaw = internal.FromOutgoingContextRaw.(func(context.Context) (metadata.MD, [][]string, bool))
@@ -362,6 +389,11 @@ func NewHTTP2Client(connectCtx, ctx context.Context, addr resolver.Address, opts
 		bufferPool:            opts.BufferPool,
 		onClose:               onClose,
 	}
+
+	clientStreamCountMu.Lock()
+	clientStreamCount[t] = 0
+	clientStreamCountMu.Unlock()
+
 	var czSecurity credentials.ChannelzSecurityValue
 	if au, ok := authInfo.(credentials.ChannelzSecurityInfo); ok {
 		czSecurity = au.GetSecurityValue()
@@ -863,8 +895,12 @@ func (t *http2Client) NewStream(ctx context.Context, callHdr *CallHdr, handler s
 		s.id = hdr.streamID
 		s.fc = inFlow{limit: uint32(t.initialWindowSize)}
 		t.activeStreams[s.id] = s
-		fmt.Printf("Client %s, active streams: %d\n", t.address.Addr, len(t.activeStreams))
+		count := len(t.activeStreams)
 		t.mu.Unlock()
+
+		clientStreamCountMu.Lock()
+		clientStreamCount[t] = count
+		clientStreamCountMu.Unlock()
 
 		if t.streamQuota > 0 && t.waitingStreams > 0 {
 			select {
@@ -974,8 +1010,15 @@ func (t *http2Client) closeStream(s *ClientStream, err error, rst bool, rstCode 
 			t.mu.Lock()
 			if t.activeStreams != nil {
 				delete(t.activeStreams, s.id)
+				count := len(t.activeStreams)
+				t.mu.Unlock()
+
+				clientStreamCountMu.Lock()
+				clientStreamCount[t] = count
+				clientStreamCountMu.Unlock()
+			} else {
+				t.mu.Unlock()
 			}
-			t.mu.Unlock()
 			if channelz.IsOn() {
 				if eosReceived {
 					t.channelz.SocketMetrics.StreamsSucceeded.Add(1)
@@ -1030,6 +1073,11 @@ func (t *http2Client) Close(err error) {
 	t.state = closing
 	streams := t.activeStreams
 	t.activeStreams = nil
+
+	clientStreamCountMu.Lock()
+	delete(clientStreamCount, t)
+	clientStreamCountMu.Unlock()
+
 	if t.kpDormant {
 		// If the keepalive goroutine is blocked on this condition variable, we
 		// should unblock it so that the goroutine eventually exits.
