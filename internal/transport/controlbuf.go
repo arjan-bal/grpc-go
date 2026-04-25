@@ -648,6 +648,8 @@ func (l *loopyWriter) incomingWindowUpdateHandler(w *incomingWindowUpdate) {
 	// Otherwise update the quota.
 	if w.streamID == 0 {
 		l.sendQuota += w.increment
+		val := l.sendQuota
+		fmt.Println("Connection window update, sendQuota", val/1024, "KB", val/1024/1024, "MB")
 		return
 	}
 	// Find the stream and update it.
