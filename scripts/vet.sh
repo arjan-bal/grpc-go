@@ -83,6 +83,58 @@ git grep -e 'context.Background()' --or -e 'context.TODO()' -- "*_test.go" | gre
 # can't parse link local IPv6 addresses.
 not git grep 'net.ParseIP' -- '*.go'
 
+# Ensure context.Background() is only used in tests, main packages, or preceded 
+# by a comment beginning with "background context:".
+git ls-files '*.go' | grep -vE -e '_test\.go$' -e '(^|/)(test|testutils|benchmark)/' | xargs awk '
+BEGIN {
+  comment_pattern = "^[ \t]*//"
+  allow_pattern = "^[ \t]*//[ \t]*background context:"
+}
+
+FNR == 1 {
+  is_main = 0
+  in_allow_block = 0
+}
+
+/^package[ \t]+main/ {
+  is_main = 1
+}
+
+# Start of allow block: Set flag to true and skip to next line
+tolower($0) ~ allow_pattern {
+  in_allow_block = 1
+  next
+}
+
+# Continuation comment: Ignore the line, but preserve the current block state
+$0 ~ comment_pattern {
+  next
+}
+
+# Blank line: Breaks the comment block (matching standard Go AST behavior)
+/^[ \t]*$/ {
+  in_allow_block = 0
+  next
+}
+
+# Real code: Check for the violation
+index($0, "context.Background()") {
+  if (!is_main && !in_allow_block) {
+    print FILENAME ":" FNR ": " $0
+    err = 1
+  }
+}
+
+# Reset: Any executable code line immediately closes the allow block
+{
+  in_allow_block = 0
+}
+
+END {
+  if (err) exit 1
+}
+' | fail_on_output
+
 misspell -error .
 
 # Get the absolute path to revive.toml relative to the script location
