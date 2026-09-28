@@ -4440,10 +4440,7 @@ func (s) TestRecvBufferCompaction(t *testing.T) {
 	// N > BufferPoolingThreshold
 	//
 	// So we need N = BufferPoolingThreshold + 1 messages in the backlog.
-	// The first message put into the recvBuffer goes directly to the channel b.c,
-	// and subsequent messages go to the backlog.
-	// Therefore, we need to put a total of 1 (for channel) + (BufferPoolingThreshold + 1) messages.
-	numMessages := imem.BufferPoolingThreshold + 2
+	numMessages := imem.BufferPoolingThreshold + 1
 	payload := []byte{0x0a}
 
 	for i := 0; i < numMessages-1; i++ {
@@ -4451,16 +4448,15 @@ func (s) TestRecvBufferCompaction(t *testing.T) {
 	}
 
 	// Verify no compaction occurred.
-	if got, want := len(b.backlog), numMessages-2; got != want {
+	if got, want := len(b.backlog), numMessages-1; got != want {
 		t.Fatalf("Got backlog length %d, want %d", got, want)
 	}
 
 	b.put(recvMsg{buffer: mem.Copy(payload, pool)})
 
 	// Verify that compaction occurred.
-	// The first message is in the channel.
-	// The remaining (BufferPoolingThreshold + 1) messages went to the backlog and should have
-	// been compacted into 1 message. So the backlog length should be exactly 1.
+	// All (BufferPoolingThreshold + 1) messages should have been compacted
+	// into 1 message. So the backlog length should be exactly 1.
 	if got, want := len(b.backlog), 1; got != want {
 		t.Fatalf("Got backlog length %d after compaction, want %d", got, want)
 	}
@@ -4471,34 +4467,20 @@ func (s) TestRecvBufferCompaction(t *testing.T) {
 		t.Fatalf("Got uncompactedBytes %d, want %d", b.uncompactedBytes, 0)
 	}
 
-	// Verify the contents of the first message (not compacted, in channel).
-	select {
-	case msg1 := <-b.c:
-		if !bytes.Equal(msg1.buffer.ReadOnlyData(), payload) {
-			t.Errorf("Unexpected first message: %v", msg1)
-		}
-		msg1.buffer.Free()
-	default:
-		t.Fatal("Expected first message to be in the channel")
-	}
-
-	b.load()
-
 	// Verify the compacted message.
-	select {
-	case msgCompacted := <-b.c:
-		wantLen := numMessages - 1
-		if msgCompacted.buffer.Len() != wantLen {
-			t.Errorf("Got compacted buffer length %d, want %d", msgCompacted.buffer.Len(), wantLen)
-		}
-		wantPayload := bytes.Repeat(payload, wantLen)
-		if !bytes.Equal(msgCompacted.buffer.ReadOnlyData(), wantPayload) {
-			t.Errorf("Compacted payload mismatch")
-		}
-		msgCompacted.buffer.Free()
-	default:
-		t.Fatal("Expected compacted message to be loaded into the channel")
+	msgCompacted, ok := b.get(nil)
+	if !ok {
+		t.Fatal("Expected compacted message to be returned")
 	}
+	wantLen := numMessages
+	if msgCompacted.buffer.Len() != wantLen {
+		t.Errorf("Got compacted buffer length %d, want %d", msgCompacted.buffer.Len(), wantLen)
+	}
+	wantPayload := bytes.Repeat(payload, wantLen)
+	if !bytes.Equal(msgCompacted.buffer.ReadOnlyData(), wantPayload) {
+		t.Errorf("Compacted payload mismatch")
+	}
+	msgCompacted.buffer.Free()
 }
 
 func (s) TestRecvBufferErrorResetsCounters(t *testing.T) {
@@ -4507,8 +4489,7 @@ func (s) TestRecvBufferErrorResetsCounters(t *testing.T) {
 	b.init(pool)
 
 	payload := []byte{0x0a}
-	// Push 3 messages. First goes to channel, second and third to backlog.
-	b.put(recvMsg{buffer: mem.Copy(payload, pool)})
+	// Push 2 messages.
 	b.put(recvMsg{buffer: mem.Copy(payload, pool)})
 	b.put(recvMsg{buffer: mem.Copy(payload, pool)})
 
@@ -4521,16 +4502,14 @@ func (s) TestRecvBufferErrorResetsCounters(t *testing.T) {
 	}
 
 	// Read one message.
-	select {
-	case msg1 := <-b.c:
-		if !bytes.Equal(msg1.buffer.ReadOnlyData(), payload) {
-			t.Errorf("Unexpected first message: %v", msg1)
-		}
-		msg1.buffer.Free()
-	default:
-		t.Fatal("Expected first message to be in the channel")
+	msg1, ok := b.get(nil)
+	if !ok {
+		t.Fatal("Expected first message to be returned")
 	}
-	b.load()
+	if !bytes.Equal(msg1.buffer.ReadOnlyData(), payload) {
+		t.Errorf("Unexpected first message: %v", msg1)
+	}
+	msg1.buffer.Free()
 	if got, want := b.uncompactedSuffixLen, 1; got != want {
 		t.Fatalf("Got uncompactedSuffixLen %d, want %d", got, want)
 	}
@@ -4550,11 +4529,6 @@ func (s) TestRecvBufferErrorResetsCounters(t *testing.T) {
 	}
 
 	// Cleanup.
-	select {
-	case msg1 := <-b.c:
-		msg1.buffer.Free()
-	default:
-	}
 	for _, msg := range b.backlog {
 		if msg.buffer != nil {
 			msg.buffer.Free()
@@ -4572,9 +4546,7 @@ func (s) TestRecvBufferCompactionSkippedLargeBuffer(t *testing.T) {
 	// (utilization factor) is met.
 	//
 	// We put N = BufferPoolingThreshold messages of 1 byte each into the backlog.
-	// Total messages put
-	// = 1 (for channel) + BufferPoolingThreshold (for backlog) = BufferPoolingThreshold + 1.
-	numSmallMessages := imem.BufferPoolingThreshold + 1
+	numSmallMessages := imem.BufferPoolingThreshold
 	payload := []byte{0x0a}
 
 	for i := 0; i < numSmallMessages; i++ {
@@ -4603,12 +4575,6 @@ func (s) TestRecvBufferCompactionSkippedLargeBuffer(t *testing.T) {
 		t.Fatalf("Got uncompactedBytes %d, want %d", b.uncompactedBytes, 0)
 	}
 
-	select {
-	case msg1 := <-b.c:
-		msg1.buffer.Free()
-	default:
-		t.Fatal("Expected first message to be in the channel, but channel is empty")
-	}
 	for _, msg := range b.backlog {
 		if msg.buffer != nil {
 			msg.buffer.Free()
@@ -4623,7 +4589,7 @@ func (s) TestRecvBufferCompactionDisabled(t *testing.T) {
 	b := &recvBuffer{}
 	b.init(pool)
 
-	numMessages := imem.BufferPoolingThreshold + 2
+	numMessages := imem.BufferPoolingThreshold + 1
 	payload := []byte{0x0a}
 
 	for i := 0; i < numMessages; i++ {
@@ -4631,21 +4597,74 @@ func (s) TestRecvBufferCompactionDisabled(t *testing.T) {
 	}
 
 	// Verify no compaction occurred.
-	// The first message is in the channel.
-	// The remaining (numMessages - 1) messages should be in the backlog.
-	if got, want := len(b.backlog), numMessages-1; got != want {
+	if got, want := len(b.backlog), numMessages; got != want {
 		t.Fatalf("Got backlog length %d, want %d", got, want)
 	}
 
-	select {
-	case msg1 := <-b.c:
-		msg1.buffer.Free()
-	default:
-		t.Fatal("Expected first message to be in the channel, but channel is empty")
-	}
 	for _, msg := range b.backlog {
 		if msg.buffer != nil {
 			msg.buffer.Free()
+		}
+	}
+}
+
+// Tests that a reader blocked in get returns when ctxDone is closed, and that
+// a message put after the cancellation is not lost.
+func (s) TestRecvBufferGetCancel(t *testing.T) {
+	b := &recvBuffer{}
+	b.init(mem.DefaultBufferPool())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, ok := b.get(ctx.Done()); ok {
+		t.Fatal("get() returned ok = true after ctxDone was closed, want false")
+	}
+
+	payload := []byte{0x0a}
+	b.put(recvMsg{buffer: mem.SliceBuffer(payload)})
+	m, ok := b.get(nil)
+	if !ok {
+		t.Fatal("get(nil) returned ok = false, want true")
+	}
+	if got := m.buffer.ReadOnlyData(); !bytes.Equal(got, payload) {
+		t.Fatalf("get(nil) returned payload %v, want %v", got, payload)
+	}
+}
+
+// Tests that racing a put against the cancellation of a blocked reader never
+// loses a message: either get returns the message, or it returns false and
+// the message is available to the next get.
+func (s) TestRecvBufferGetCancelRace(t *testing.T) {
+	for i := range 1000 {
+		b := &recvBuffer{}
+		b.init(mem.DefaultBufferPool())
+		payload := []byte{byte(i)}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			b.put(recvMsg{buffer: mem.SliceBuffer(payload)})
+		}()
+		go func() {
+			defer wg.Done()
+			cancel()
+		}()
+		m, ok := b.get(ctx.Done())
+		wg.Wait()
+		if !ok {
+			m, ok = b.get(nil)
+			if !ok {
+				t.Fatal("get(nil) returned ok = false, want true")
+			}
+		}
+		if got := m.buffer.ReadOnlyData(); !bytes.Equal(got, payload) {
+			t.Fatalf("Iteration %d: got payload %v, want %v", i, got, payload)
+		}
+		// The handoff channel must be empty for the next wait.
+		if len(b.c) != 0 {
+			t.Fatalf("Iteration %d: len(b.c) = %d after get, want 0", i, len(b.c))
 		}
 	}
 }

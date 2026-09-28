@@ -89,6 +89,10 @@ type recvMsg struct {
 
 // recvBuffer is an unbounded channel of recvMsg structs.
 //
+// The mutex-protected backlog is the single source of truth. The channel c is
+// used only to hand a message directly to a reader that is already blocked,
+// so that in the common case both put and get acquire a single lock.
+//
 // Note: recvBuffer differs from buffer.Unbounded in that it provides in-place
 // value initialization (via init) to avoid struct pointer allocations on
 // streams, and automatically frees pooled mem.Buffer payloads when stream
@@ -97,6 +101,9 @@ type recvBuffer struct {
 	c       chan recvMsg
 	mu      sync.Mutex
 	backlog []recvMsg
+	// waiting is set when the reader is blocked, or about to block, on c.
+	// The writer that clears it owns the handoff of one message through c.
+	waiting bool
 	// uncompactedSuffixLen tracks the number of consecutive data messages at
 	// the tail of backlog that have not been compacted.
 	uncompactedSuffixLen int
@@ -117,25 +124,29 @@ func (b *recvBuffer) init(pool mem.BufferPool) {
 
 func (b *recvBuffer) put(r recvMsg) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.err != nil {
-		// drop the buffer on the floor. Since b.err is not nil, any subsequent reads
-		// will always return an error, making this buffer inaccessible.
+		b.mu.Unlock()
+		// drop the buffer on the floor. Since b.err is not nil, any subsequent
+		// reads will always return an error, making this buffer inaccessible.
 		r.buffer.Free()
 		// An error had occurred earlier, don't accept more
 		// data or errors.
 		return
 	}
 	b.err = r.err
-	if len(b.backlog) == 0 {
-		select {
-		case b.c <- r:
-			return
-		default:
-		}
+	if b.waiting {
+		// The reader is blocked on c and the backlog is empty; hand the
+		// message over directly.
+		b.waiting = false
+		b.mu.Unlock()
+		// This doesn't block: c has capacity 1 and there is at most one
+		// handoff per wait.
+		b.c <- r
+		return
 	}
 	b.backlog = append(b.backlog, r)
 	b.compactBacklogLocked(r)
+	b.mu.Unlock()
 }
 
 func (b *recvBuffer) compactBacklogLocked(r recvMsg) {
@@ -196,32 +207,52 @@ func (b *recvBuffer) compactBacklogLocked(r recvMsg) {
 	b.uncompactedSuffixLen = 0
 }
 
-func (b *recvBuffer) load() {
+// get returns the next recvMsg in the buffer. If the buffer is empty, it
+// blocks until a recvMsg is put or ctxDone is closed. It returns false if
+// ctxDone was closed before a recvMsg became available. A nil ctxDone blocks
+// until a recvMsg is available.
+func (b *recvBuffer) get(ctxDone <-chan struct{}) (recvMsg, bool) {
 	b.mu.Lock()
 	if len(b.backlog) > 0 {
-		select {
-		case b.c <- b.backlog[0]:
-			// backlog[0] is only part of the tracked uncompacted suffix if the
-			// entire backlog currently consists of the suffix. If an earlier
-			// compaction or reset occurred, backlog[0] is already compacted.
-			if envconfig.EnableReceiveBufferCompaction && b.uncompactedSuffixLen == len(b.backlog) {
-				b.uncompactedSuffixLen--
-				b.uncompactedBytes -= b.backlog[0].buffer.Len()
-			}
-			b.backlog[0] = recvMsg{}
-			b.backlog = b.backlog[1:]
-		default:
+		m := b.backlog[0]
+		// backlog[0] is only part of the tracked uncompacted suffix if the
+		// entire backlog currently consists of the suffix. If an earlier
+		// compaction or reset occurred, backlog[0] is already compacted.
+		if envconfig.EnableReceiveBufferCompaction && b.uncompactedSuffixLen == len(b.backlog) {
+			b.uncompactedSuffixLen--
+			b.uncompactedBytes -= m.buffer.Len()
 		}
+		b.backlog[0] = recvMsg{}
+		if len(b.backlog) == 1 {
+			// Retain the capacity; slicing past the last element would leave
+			// a zero capacity slice and force the next append to allocate.
+			b.backlog = b.backlog[:0]
+		} else {
+			b.backlog = b.backlog[1:]
+		}
+		b.mu.Unlock()
+		return m, true
 	}
+	b.waiting = true
 	b.mu.Unlock()
-}
 
-// get returns the channel that receives a recvMsg in the buffer.
-//
-// Upon receipt of a recvMsg, the caller should call load to send another
-// recvMsg onto the channel if there is any.
-func (b *recvBuffer) get() <-chan recvMsg {
-	return b.c
+	select {
+	case m := <-b.c:
+		return m, true
+	case <-ctxDone:
+		b.mu.Lock()
+		if b.waiting {
+			// No writer has claimed the handoff; cancel the wait.
+			b.waiting = false
+			b.mu.Unlock()
+			return recvMsg{}, false
+		}
+		b.mu.Unlock()
+		// A writer has already claimed the handoff and is sending (or has
+		// sent) the message on c. Receive it so that it isn't lost and c is
+		// empty for the next wait.
+		return <-b.c, true
+	}
 }
 
 // recvBufferReader implements io.Reader interface to read the data from
@@ -278,29 +309,27 @@ func (r *recvBufferReader) Read(n int) (buf mem.Buffer, err error) {
 }
 
 func (r *recvBufferReader) readMessageHeader(header []byte) (n int, err error) {
-	select {
-	case <-r.ctxDone:
+	m, ok := r.recv.get(r.ctxDone)
+	if !ok {
 		return 0, ContextErr(r.ctx.Err())
-	case m := <-r.recv.get():
-		return r.readMessageHeaderAdditional(m, header)
 	}
+	return r.readMessageHeaderAdditional(m, header)
 }
 
 func (r *recvBufferReader) read(n int) (buf mem.Buffer, err error) {
-	select {
-	case <-r.ctxDone:
+	m, ok := r.recv.get(r.ctxDone)
+	if !ok {
 		return nil, ContextErr(r.ctx.Err())
-	case m := <-r.recv.get():
-		return r.readAdditional(m, n)
 	}
+	return r.readAdditional(m, n)
 }
 
 func (r *recvBufferReader) readMessageHeaderClient(header []byte) (n int, err error) {
 	// If the context is canceled, then closes the stream with nil metadata.
 	// closeStream writes its error parameter to r.recv as a recvMsg.
 	// r.readAdditional acts on that message and returns the necessary error.
-	select {
-	case <-r.ctxDone:
+	m, ok := r.recv.get(r.ctxDone)
+	if !ok {
 		// Note that this adds the ctx error to the end of recv buffer, and
 		// reads from the head. This will delay the error until recv buffer is
 		// empty, thus will delay ctx cancellation in Recv().
@@ -315,19 +344,17 @@ func (r *recvBufferReader) readMessageHeaderClient(header []byte) (n int, err er
 		// we really want is to mark the stream as done, and return ctx error
 		// faster.
 		r.clientStream.Close(ContextErr(r.ctx.Err()))
-		m := <-r.recv.get()
-		return r.readMessageHeaderAdditional(m, header)
-	case m := <-r.recv.get():
-		return r.readMessageHeaderAdditional(m, header)
+		m, _ = r.recv.get(nil)
 	}
+	return r.readMessageHeaderAdditional(m, header)
 }
 
 func (r *recvBufferReader) readClient(n int) (buf mem.Buffer, err error) {
 	// If the context is canceled, then closes the stream with nil metadata.
 	// closeStream writes its error parameter to r.recv as a recvMsg.
 	// r.readAdditional acts on that message and returns the necessary error.
-	select {
-	case <-r.ctxDone:
+	m, ok := r.recv.get(r.ctxDone)
+	if !ok {
 		// Note that this adds the ctx error to the end of recv buffer, and
 		// reads from the head. This will delay the error until recv buffer is
 		// empty, thus will delay ctx cancellation in Recv().
@@ -342,15 +369,12 @@ func (r *recvBufferReader) readClient(n int) (buf mem.Buffer, err error) {
 		// we really want is to mark the stream as done, and return ctx error
 		// faster.
 		r.clientStream.Close(ContextErr(r.ctx.Err()))
-		m := <-r.recv.get()
-		return r.readAdditional(m, n)
-	case m := <-r.recv.get():
-		return r.readAdditional(m, n)
+		m, _ = r.recv.get(nil)
 	}
+	return r.readAdditional(m, n)
 }
 
 func (r *recvBufferReader) readMessageHeaderAdditional(m recvMsg, header []byte) (n int, err error) {
-	r.recv.load()
 	if m.err != nil {
 		if m.buffer != nil {
 			m.buffer.Free()
@@ -364,7 +388,6 @@ func (r *recvBufferReader) readMessageHeaderAdditional(m recvMsg, header []byte)
 }
 
 func (r *recvBufferReader) readAdditional(m recvMsg, n int) (b mem.Buffer, err error) {
-	r.recv.load()
 	if m.err != nil {
 		if m.buffer != nil {
 			m.buffer.Free()
